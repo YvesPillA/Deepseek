@@ -14,7 +14,7 @@ import {verifyReleaseApproval} from './release-approval.mjs';
 export const name = 'foreman-next';
 export const inject = ['agents','sessions'];
 
-/** Host-plane plugin entry. It intentionally exposes no user mutation RPC and no shell.
+/** Host-plane plugin entry. Exposes only authenticated terminal-card actions, never a general user-command RPC or shell.
  * Runtime composition and UI authorization are integration gates, not prompt assertions.
  * All methods below are trusted same-process capabilities; never publish them through
  * Creator-mode service inspection to execution/observer agents.
@@ -40,7 +40,7 @@ async function mountHost(ctx,config,options) {
   const recovery=new SessionRecovery({controller,store,context:()=>{if(!sessionContext)throw Error('Session persistence is unavailable');return sessionContext;},
     maintenance:operation=>{if(!scheduler)throw Error('Runtime scheduler is unavailable');return scheduler.runStopped(operation);}});
   const service = Object.freeze({
-    list: () => Object.values(store.snapshot().projects).filter(p=>!p.archived).map(p=>({id:p.id,objective:p.objective,status:p.status,notificationCount:p.notifications.filter(n=>!n.acknowledged&&n.kind!=='record').length})),
+    list: () => Object.values(store.snapshot().projects).filter(p=>!p.archived && !p.deleted).map(p=>({id:p.id,objective:p.objective,status:p.status,notificationCount:p.notifications.filter(n=>!n.acknowledged&&n.kind!=='record').length})),
     view: id => controller.view(id),
     snapshot:()=>dashboardSnapshot(store.snapshot(),service.readiness()),
     readiness: () => readinessSnapshot({application,scheduler,sessionContext,userControl,dashboardConnected,projectManagementConnected,agentOptions:config.scheduler?.agentOptions,releaseApproval}),
@@ -51,7 +51,8 @@ async function mountHost(ctx,config,options) {
     ctx.inject(['sessionPersistence'],runtimeCtx=>{
       sessionContext={agents:runtimeCtx.get('agents'),sessionPersistence:runtimeCtx.get('sessionPersistence')};
       const options=config.scheduler??{};
-      const loop=createManagedRuntime(application,{agents:runtimeCtx.get('agents'),sessions:runtimeCtx.get('sessions'),sessionPersistence:runtimeCtx.get('sessionPersistence')},
+      const loop=createManagedRuntime(application,{agents:runtimeCtx.get('agents'),sessions:runtimeCtx.get('sessions'),sessionPersistence:runtimeCtx.get('sessionPersistence'),
+          get sessionTitle(){return runtimeCtx.get('sessionTitle');},get workspaceRegistry(){return runtimeCtx.get('workspaceRegistry');}},
         {intervalMs:options.intervalMs,reviewTimeoutMs:options.reviewTimeoutMs,executionTimeoutMs:options.executionTimeoutMs,agentOptions:options.agentOptions,
           enabled:()=>!!userControl && service.readiness().readyForProjects});
       scheduler=loop;
@@ -86,7 +87,7 @@ async function mountHost(ctx,config,options) {
         await controller.confirmUserCommand(ticket,'foreman-panel-'+randomUUID(),{authorize,source:'dsh-panel-operator'});
       };
       const actions=operator && typeof operator.ctx?.fiber?.assertActive==='function'
-        ?{operator,archive:action('archive'),unarchive:action('unarchive')}:undefined;
+        ?{operator,archive:action('archive'),unarchive:action('unarchive'),'delete-project':action('delete-project')}:undefined;
       const dispose=connection.rpc.handle('/foreman-next',dashboardHandler(service.snapshot,()=>alertSnapshot(store.snapshot()),actions));
       dashboardConnected=true;
       projectManagementConnected=!!actions;

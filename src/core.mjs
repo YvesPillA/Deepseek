@@ -121,7 +121,14 @@ export function transition(previous, actor, command) {
   } else {
     key(command.project); const p = s.projects[command.project]; check(p, 'Unknown project');
     check(actor.role === 'user' || actor.project === p.id, 'Cross-project access denied');
-    if(['archive','unarchive'].includes(kind)) {
+    check(p.deleted!==true,'Project record is deleted');
+    if(kind==='delete-project') {
+      user();check(['cancelled','delivered'].includes(p.status),'Only cancelled or delivered projects can be deleted');
+      check(p.archived===true,'Archive the project before deleting its record');
+      // Keep the v1 journal history and ID reservation. This is a list tombstone,
+      // never filesystem deletion or removal of an outer conversation.
+      p.deleted=true;p.deletedAt=new Date().toISOString();p.archiveVersion=(p.archiveVersion??0)+1;
+    } else if(['archive','unarchive'].includes(kind)) {
       user();check(['cancelled','delivered'].includes(p.status),'Only cancelled or delivered projects can be archived or restored');
       check(kind==='archive'?p.archived!==true:p.archived===true,kind==='archive'?'Project is already archived':'Project is not archived');
       p.archived=kind==='archive';p.archiveVersion=(p.archiveVersion??0)+1;

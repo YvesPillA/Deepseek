@@ -10,7 +10,7 @@ const allowed = {
 };
 const ensure = (value, reason) => { if (!value) throw new Error(reason); };
 const approvalBasis=p=>p?JSON.stringify({status:p.status,configVersion:p.configVersion,objective:p.objective,workspace:p.workspace,
-  archived:p.archived===true,archiveVersion:p.archiveVersion??0,
+  archived:p.archived===true,deleted:p.deleted===true,archiveVersion:p.archiveVersion??0,
   coordinatorWake:p.coordinatorWake,
   reviewers:p.reviewers,milestones:p.milestones,rounds:Object.values(p.rounds).map(r=>({id:r.id,status:r.status,generation:r.generation}))}):null;
 
@@ -77,7 +77,7 @@ export class Controller {
       authorize();
       const prepared=this.#prepared.get(ticket);ensure(prepared,'Unknown or consumed user confirmation');
       ensure(['dsh-user-questions','dsh-panel-operator'].includes(source),'Unknown human confirmation source');
-      ensure(source!=='dsh-panel-operator' || ['archive','unarchive'].includes(prepared.command.type),'Panel operator confirmation is limited to project archive and display restore');
+      ensure(source!=='dsh-panel-operator' || ['archive','unarchive','delete-project'].includes(prepared.command.type),'Panel operator confirmation is limited to project archive, display restore and record deletion');
       this.#prepared.delete(ticket);
       const command=structuredClone(prepared.command),state=this.#store.snapshot();
       ensure(approvalBasis(state.projects[command.project??command.id])===prepared.basis,'Project changed while awaiting confirmation; review the updated proposal');
@@ -119,6 +119,7 @@ export class Controller {
     return this.#serialize(async()=>{
       const actor = this.identity(agent);
       const project=this.view(actor.project);
+      ensure(project.deleted!==true,'Project record is deleted');
       ensure(project.archived!==true,'Project is archived; restore its display first');
       if(actor.configVersion!==undefined)ensure(actor.configVersion===project.configVersion,'Agent configuration has expired');
       if(actor.role==='executor' && actor.task!==undefined)ensure(command.task===actor.task,'Executor is bound to another task');
@@ -205,8 +206,10 @@ export class DshAgentDriver {
     const operation=this.#create(binding,options);this.#creating.add(operation);
     void operation.then(()=>this.#creating.delete(operation),()=>this.#creating.delete(operation));return operation;
   }
-  async #create(binding, {cwd,model,persistedSessionId,sessionId=randomUUID()}={}) {
+  async #create(binding, {cwd,model,persistedSessionId,sessionId=randomUUID(),sessionMeta}={}) {
     ensure(!this.#closed,'Driver closed');
+    ensure(sessionMeta===undefined || sessionMeta && typeof sessionMeta==='object' && !Array.isArray(sessionMeta) &&
+      Object.keys(sessionMeta).length===1 && sessionMeta.origin==='subagent','Only internal-session classification metadata is allowed');
     let revoke;
     const setup=async (agentCtx,agent=agentCtx.agent)=>{
       await this.#compose(agentCtx,binding,agent);
@@ -216,7 +219,7 @@ export class DshAgentDriver {
     try {
       handle=persistedSessionId
         ? await this.#ctx.agents.resume({resumeSessionId:persistedSessionId,agentOptions:model,setup,signal:this.#abort.signal})
-        : await this.#ctx.agents.create({sessionId,meta:{cwd},agentOptions:model,setup,signal:this.#abort.signal});
+        : await this.#ctx.agents.create({sessionId,meta:{...sessionMeta,cwd},agentOptions:model,setup,signal:this.#abort.signal});
       if(this.#closed) {await handle.dispose();revoke?.();throw new Error('Driver closed during creation');}
       this.#handles.set(handle.agent,{handle,revoke});return handle.agent;
     } catch(e) {revoke?.();throw e;}

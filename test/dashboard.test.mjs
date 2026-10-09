@@ -61,6 +61,7 @@ test('client registers the rc.2 main panel and sidebar entry with narrow authent
   await entries[2][0].inject().load(signal);assert.equal(request[1],'alerts');assert.equal(Object.keys(request[2]).length,0);
   await entry.inject().manage({endpoint:'archive',project:'p',archiveVersion:0},signal);
   assert.equal(request[1],'archive');assert.deepEqual(Object.keys(request[2]).sort(),['archiveVersion','project']);assert.equal(request[2].project,'p');assert.equal(request[3],signal);
+  await entry.inject().manage({endpoint:'delete-project',project:'p',archiveVersion:3},signal);assert.equal(request[1],'delete-project');assert.deepEqual(Object.keys(request[2]).sort(),['archiveVersion','project']);assert.equal(request[2].project,'p');assert.equal(request[2].archiveVersion,3);assert.equal(request[3],signal);
   await assert.rejects(entry.inject().manage({endpoint:'deliver',project:'p',archiveVersion:0},signal),/Unsupported/);
 });
 
@@ -89,6 +90,24 @@ test('project-card RPC accepts only live exact operator and two narrow metadata 
   assert.equal((await dashboardHandler(()=>({}))('archive',{project:'p',archiveVersion:0},signal,operator)).error.code,'bad-request');
 });
 
+test('deleted records are absent from both lists and alerts without exposing retained history',()=>{
+  const s=state();s.projects.p.deleted=true;s.projects.p.archived=true;
+  assert.deepEqual(dashboardSnapshot(s,{}).projects,[]);assert.deepEqual(dashboardSnapshot(s,{}).archivedProjects,[]);assert.deepEqual(alertSnapshot(s).alerts,[]);
+  s.projects.p.archived=false;assert.deepEqual(dashboardSnapshot(s,{}).projects,[]);assert.deepEqual(alertSnapshot(s).alerts,[]);
+  assert(s.projects.p.audit.some(a=>a.secret==='PRIVATE_AUDIT'));assert(!JSON.stringify(dashboardSnapshot(s,{})).includes('PRIVATE_'));
+});
+
+test('record deletion RPC is exact-operator-only, cancelled safely and limited to project/version',async()=>{
+  let active=true,calls=0;const operator={ctx:{fiber:{assertActive(){if(!active)throw Error('Disposed');}}}},abort=new AbortController();
+  const handler=dashboardHandler(()=>({revision:calls}),undefined,{operator,'delete-project':async(payload,signal,peer)=>{assert.deepEqual(payload,{project:'p',archiveVersion:3});assert.equal(signal,abort.signal);assert.equal(peer,operator);calls++;}});
+  for(const peer of [undefined,{ctx:operator.ctx}])assert.equal((await handler('delete-project',{project:'p',archiveVersion:3},abort.signal,peer)).error.code,'forbidden');
+  for(const payload of [{project:'p',archiveVersion:3,deleteFiles:true},{project:'p',archiveVersion:3,type:'cancel'},{project:'p',archiveVersion:3.1},{project:'p'}])assert.equal((await handler('delete-project',payload,abort.signal,operator)).error.code,'bad-request');
+  assert.equal(calls,0);assert.deepEqual(await handler('delete-project',{project:'p',archiveVersion:3},abort.signal,operator),{ok:true,value:{revision:1}});
+  active=false;assert.equal((await handler('delete-project',{project:'p',archiveVersion:3},abort.signal,operator)).error.code,'forbidden');active=true;abort.abort();
+  assert.equal((await handler('delete-project',{project:'p',archiveVersion:3},abort.signal,operator)).error.code,'cancelled');assert.equal(calls,1);
+  assert.equal((await dashboardHandler(()=>({}))('delete-project',{project:'p',archiveVersion:3},undefined,operator)).error.code,'bad-request');
+});
+
 test('operator disposal during an action and callback rejection cannot report successful card management',async()=>{
   let disposed=false;
   const operator={ctx:{fiber:{assertActive(){if(disposed)throw Error('Disposed');}}}};
@@ -104,10 +123,10 @@ test('actual 0.2 OperatorPeer scope authorizes the narrow callback and revokes a
   const {Context}=await import(pathToFileURL(actualRequire.resolve('@deepseek-ai/cordis')).href);
   const {OperatorPeer}=await import(pathToFileURL(actualRequire.resolve('@deepseek-ai/dsh-client-connection')).href);
   const peer=new OperatorPeer(new Context());let calls=0;
-  const handler=dashboardHandler(()=>({revision:calls}),undefined,{operator:peer,archive:async()=>{calls++;}});
-  try {assert.equal((await handler('archive',{project:'p',archiveVersion:0},undefined,peer)).ok,true);assert.equal(calls,1);}
+  const handler=dashboardHandler(()=>({revision:calls}),undefined,{operator:peer,archive:async()=>{calls++;},'delete-project':async()=>{calls++;}});
+  try {assert.equal((await handler('archive',{project:'p',archiveVersion:0},undefined,peer)).ok,true);assert.equal((await handler('delete-project',{project:'p',archiveVersion:1},undefined,peer)).ok,true);assert.equal(calls,2);}
   finally {await peer.dispose();}
-  assert.equal((await handler('archive',{project:'p',archiveVersion:0},undefined,peer)).error.code,'forbidden');assert.equal(calls,1);
+  assert.equal((await handler('archive',{project:'p',archiveVersion:0},undefined,peer)).error.code,'forbidden');assert.equal((await handler('delete-project',{project:'p',archiveVersion:1},undefined,peer)).error.code,'forbidden');assert.equal(calls,2);
 });
 
 test('actual React shows archive only for ended projects and a recoverable archive view with explicit confirmation',async()=>{
@@ -121,6 +140,17 @@ test('actual React shows archive only for ended projects and a recoverable archi
   const archived=render({data:dashboardSnapshot(s,{readyForProjects:true}),showArchived:true,pendingAction:{endpoint:'unarchive',project:'p',archiveVersion:1}});
   for(const text of ['已归档（1）','恢复到项目列表','确认恢复显示','不会重启任务','基础功能','通过行为测试'])assert(archived.includes(text),text);
   const defaultList=render({data:dashboardSnapshot(s,{readyForProjects:true})});assert(!defaultList.includes('基础功能'));assert(defaultList.includes('已归档（1）'));
+});
+
+test('actual React offers deletion only inside archived terminal cards with a separate irreversible confirmation',async()=>{
+  const api=await client(),s=state(),render=props=>renderToStaticMarkup(React.createElement(api.ForemanView,{onRequestAction:()=>{},...props}));
+  s.projects.p.status='cancelled';assert(!render({data:dashboardSnapshot(s,{})}).includes('删除记录，文件保留'));
+  s.projects.p.archived=true;s.projects.p.archiveVersion=3;
+  const first=render({data:dashboardSnapshot(s,{}),showArchived:true});assert(first.includes('恢复到项目列表'));assert(first.includes('删除记录，文件保留'));assert(!first.includes('确认删除记录'));
+  const second=render({data:dashboardSnapshot(s,{}),showArchived:true,pendingAction:{endpoint:'delete-project',project:'p',archiveVersion:3}});
+  for(const text of ['确认删除归档项目记录','确认删除记录','从列表删除，此处不能恢复','工作区文件和原始审计保留','外层聊天保留','返回'])assert(second.includes(text),text);
+  assert(!second.includes('确认恢复显示'));
+  s.projects.p.deleted=true;const gone=render({data:dashboardSnapshot(s,{}),showArchived:true});assert(!gone.includes('基础功能'));assert(!gone.includes('确认删除记录'));
 });
 
 test('settings panel explains missing startup components without claiming configuration proves readiness',async()=>{

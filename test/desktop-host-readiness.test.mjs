@@ -31,6 +31,14 @@ test('authenticated panel archives only terminal display metadata and rejects st
     assert.equal((await handler('unarchive',{project:'ended',archiveVersion:0},undefined,operator)).ok,false);
     assert.equal((await handler('unarchive',{project:'ended',archiveVersion:1},undefined,operator)).ok,true);
     assert.equal(service.view('ended').status,'cancelled');assert.equal(service.view('ended').archiveVersion,2);
+    assert.equal((await handler('delete-project',{project:'ended',archiveVersion:2},undefined,operator)).ok,false);
+    assert.equal((await handler('archive',{project:'ended',archiveVersion:2},undefined,operator)).ok,true);
+    assert.equal((await handler('delete-project',{project:'ended',archiveVersion:2},undefined,operator)).ok,false);
+    assert.equal((await handler('delete-project',{project:'ended',archiveVersion:3},undefined,operator)).ok,true);
+    assert.equal(service.view('ended').deleted,true);assert.equal(service.view('ended').archiveVersion,4);
+    assert.equal(service.view('ended').audit.at(-1).command.userApproval.source,'dsh-panel-operator');
+    assert.equal((await handler('unarchive',{project:'ended',archiveVersion:4},undefined,operator)).ok,false);
+    assert.equal(service.snapshot().archivedProjects.length,0);assert.deepEqual(service.list().map(p=>p.id),['active']);
     assert.equal((await handler('archive',{project:'ended',archiveVersion:0},undefined,operator)).ok,false);
     const abort=new AbortController();abort.abort();
     assert.equal((await handler('archive',{project:'ended',archiveVersion:2},abort.signal,operator)).ok,false);
@@ -39,7 +47,7 @@ test('authenticated panel archives only terminal display metadata and rejects st
     operatorActive=true;await fiber.dispose();
     assert.equal((await handler('archive',{project:'ended',archiveVersion:2},undefined,operator)).ok,false);
     const reopened=await JournalStore.open(root);
-    try {const state=reopened.snapshot();assert.equal(state.projects.ended.archived,false);assert.equal(state.projects.ended.archiveVersion,2);assert.equal(state.projects.active.status,'running');}
+    try {const state=reopened.snapshot();assert.equal(state.projects.ended.archived,true);assert.equal(state.projects.ended.deleted,true);assert.equal(state.projects.ended.archiveVersion,4);assert.equal(state.projects.active.status,'running');}
     finally {await reopened.close();}
   } finally {await fiber.dispose();await fs.rm(root,{recursive:true,force:true});}
 });

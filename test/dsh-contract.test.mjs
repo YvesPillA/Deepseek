@@ -237,6 +237,11 @@ test('outer tools use the actual DSH confirmation service and are revoked with t
     assert.equal(state.projects.p.audit.at(-1).command.userApproval.source,'dsh-user-questions');
     assert.equal((await execute(root,'foreman_user_request',{command:JSON.stringify({type:'unarchive',project:'p'})})).isError,false);
     assert.equal(state.projects.p.archived,false);assert.equal(state.projects.p.status,'cancelled');assert.equal(asked,3);
+    assert.equal((await execute(root,'foreman_user_request',{command:JSON.stringify({type:'archive',project:'p'})})).isError,false);
+    assert.equal((await execute(sibling,'foreman_user_request',{command:JSON.stringify({type:'delete-project',project:'p'})})).isError,true);
+    assert.equal((await execute(root,'foreman_user_request',{command:JSON.stringify({type:'delete-project',project:'p'})})).isError,false);
+    assert.equal(state.projects.p.deleted,true);assert.equal(state.projects.p.status,'cancelled');assert.equal(asked,5);assert.equal(state.projects.p.audit.at(-1).command.userApproval.source,'dsh-user-questions');
+    assert.equal((await execute(root,'foreman_user_request',{command:JSON.stringify({type:'unarchive',project:'p'})})).isError,true);assert.equal(asked,5);
     await scope.dispose();assert.throws(()=>control.authorizeRoot(root),/bound live/);
   } finally {await scope.dispose();await other.dispose();unregister();await questions.dispose();await tools.dispose();await prompt.dispose();await controller.close();}
 });

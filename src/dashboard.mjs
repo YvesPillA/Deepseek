@@ -1,7 +1,7 @@
 /** Detached, read-only UI projection. Never publish journal commands, sessions or
  * agent capabilities. Findings are rendered as text by the client. */
 export function dashboardSnapshot(state,readiness) {
-  const projects=Object.values(state.projects).map(p=>({
+  const projects=Object.values(state.projects).filter(p=>p.deleted!==true).map(p=>({
     id:p.id,objective:p.objective,workspace:p.workspace,status:p.status,configVersion:p.configVersion,
     archived:p.archived===true,archiveVersion:p.archiveVersion??0,archivedAt:p.archivedAt??null,
     settings:{denialLimit:p.denialLimit,patrolEvery:p.patrolEvery,faultRetries:p.faultRetries},
@@ -24,7 +24,7 @@ export function dashboardSnapshot(state,readiness) {
 }
 
 export function alertSnapshot(state) {
-  return {revision:state.revision,alerts:Object.values(state.projects).filter(p=>p.archived!==true).flatMap(p=>
+  return {revision:state.revision,alerts:Object.values(state.projects).filter(p=>p.deleted!==true && p.archived!==true).flatMap(p=>
     p.notifications.filter(n=>!n.acknowledged && !n.resolved && ['decision','fault','delivery'].includes(n.kind))
       .map(n=>({project:p.id,objective:p.objective,id:n.id,kind:n.kind,message:n.message}))) };
 }
@@ -36,7 +36,7 @@ export function dashboardHandler(snapshot,alerts,actions={}) {
   };
   return async(endpoint,payload,signal,peer)=>{
     if(signal?.aborted)return {ok:false,error:{code:'cancelled',message:'Request cancelled',details:{}}};
-    if((endpoint==='archive'||endpoint==='unarchive') && typeof actions[endpoint]==='function') {
+    if(['archive','unarchive','delete-project'].includes(endpoint) && typeof actions[endpoint]==='function') {
       if(!authorized(peer))return {ok:false,error:{code:'forbidden',message:'Only the authenticated live operator can manage archived project cards',details:{}}};
       if(!payload || Array.isArray(payload) || typeof payload!=='object' || Object.keys(payload).length!==2 ||
         Object.keys(payload).some(key=>!['project','archiveVersion'].includes(key)) || typeof payload.project!=='string' || !payload.project || payload.project.length>1000 ||

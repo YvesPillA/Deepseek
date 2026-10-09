@@ -45,6 +45,7 @@ export function createOuterComposer(control,{snapshot}) {
         '创建中断且无持久内容的空会话：{type:"recover-empty-session",project,notification:代理会话故障通知ID}，原生确认后才会停止旧代理并替换会话，保留现有文件和规则。已有日志内容不能使用此入口。'+
         '取消里程碑：{type:"cancel-milestone",project,milestone}；终止：{type:"cancel",project}；最终交付：{type:"deliver",project}。每项均须原生确认，最终交付还须全员验收通过。'+
         '隐藏已结束项目：{type:"archive",project}；恢复归档项目显示：{type:"unarchive",project}。仅适用于已取消或已交付项目，均须原生确认。归档只从默认列表隐藏，保留项目文件、会话和审计；恢复显示不重新启动任务，也不能复用旧项目ID。'+
+        '删除已归档项目记录：{type:"delete-project",project}，须原生确认。仅适用于已归档且已取消或已交付项目；从当前和归档列表移除且不能恢复，保留工作区文件、外层聊天、必要内部审计及旧ID，不擦除原始日志。'+
         '依赖权限申请：先用 foreman_dependency_candidates 列出宿主准备目录中的候选 ID（列出不代表已批准或可用），再用 {type:"use-dependency-image",project,candidate} 请求用户确认。没有匹配候选时，可用 {type:"build-dependencies",project} 申请联网构建锁定依赖，原生确认后才会开始，最长10分钟。构建完成只生成候选，使用仍需单独确认。构建结果不明时用 foreman_dependency_recover 核对状态，该工具不会重新构建。未配置构建服务则向用户报告，不自行编造镜像或确认记录。'
       });
       tools.register({name:'foreman_status',description:'Read project progress, locked reviewers and decisions awaiting the user.',parameters:schema({}),output,

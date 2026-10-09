@@ -50,7 +50,7 @@ window.__ModuleLoader__.load({
     const tag=(text,key)=>h('span',{className:'fmn-tag',key},text);
     const empty=text=>h('p',{className:'fmn-muted'},text);
     function Project({project:p,onRequestAction,pendingAction,onConfirmAction,onCancelAction,actionBusy}) {
-      const terminal=['cancelled','delivered'].includes(p.status),confirm=pendingAction?.project===p.id;
+      const terminal=['cancelled','delivered'].includes(p.status),confirm=pendingAction?.project===p.id,deleting=confirm&&pendingAction.endpoint==='delete-project';
       return h(React.Fragment,null,
         h('section',{className:'fmn-card','aria-label':'项目设置'},
           h('h3',null,p.objective),tag(label(p.status)),tag(`规则版本 ${p.configVersion}`),
@@ -59,11 +59,12 @@ window.__ModuleLoader__.load({
           h('p',{className:'fmn-muted'},`已完成 ${p.completions} 次任务，累计完成 ${p.nextPatrol} 次时触发下一轮巡查。`),
           p.archived?h('p',{className:'fmn-muted'},'已归档。恢复只显示项目，已结束的任务不会重新启动。'):null,
           terminal && onRequestAction?h('div',{className:'fmn-actions'},
-            h('button',{type:'button',disabled:actionBusy,onClick:()=>onRequestAction({endpoint:p.archived?'unarchive':'archive',project:p.id,archiveVersion:p.archiveVersion??0})},p.archived?'恢复到项目列表':'从列表归档')):null,
-          terminal && confirm?h('div',{className:'fmn-note','aria-label':p.archived?'确认恢复项目显示':'确认归档项目'},
-            h('p',null,p.archived?'恢复后重新显示这个项目；项目仍保持已结束状态，不会重启任务。':'从列表归档这个项目，保留项目文件、日志和审查记录。可在“已归档”中查看或恢复。'),
+            h('button',{type:'button',disabled:actionBusy,onClick:()=>onRequestAction({endpoint:p.archived?'unarchive':'archive',project:p.id,archiveVersion:p.archiveVersion??0})},p.archived?'恢复到项目列表':'从列表归档'),
+            p.archived?h('button',{type:'button',disabled:actionBusy,onClick:()=>onRequestAction({endpoint:'delete-project',project:p.id,archiveVersion:p.archiveVersion??0})},'删除记录，文件保留'):null):null,
+          terminal && confirm && (!deleting||p.archived)?h('div',{className:'fmn-note','aria-label':deleting?'确认删除归档项目记录':p.archived?'确认恢复项目显示':'确认归档项目'},
+            h('p',null,deleting?'从列表删除，此处不能恢复；工作区文件和原始审计保留。外层聊天保留；内部保留旧项目ID。':p.archived?'恢复后重新显示这个项目；项目仍保持已结束状态，不会重启任务。':'从列表归档这个项目，保留项目文件、日志和审查记录。可在“已归档”中查看或恢复。'),
             h('div',{className:'fmn-actions'},
-              h('button',{type:'button',disabled:actionBusy,onClick:onConfirmAction},actionBusy?'处理中…':p.archived?'确认恢复显示':'确认归档'),
+              h('button',{type:'button',disabled:actionBusy,onClick:onConfirmAction},actionBusy?'处理中…':deleting?'确认删除记录':p.archived?'确认恢复显示':'确认归档'),
               h('button',{type:'button',disabled:actionBusy,onClick:onCancelAction},'返回'))):null),
         p.notifications.length?h('section',{className:'fmn-note','aria-label':'待处理问题'},
           h('h3',null,'需要你处理'),h('ul',null,p.notifications.map(n=>h('li',{key:n.id},tag(label(n.kind)),n.message))),
@@ -198,7 +199,7 @@ window.__ModuleLoader__.load({
         return result.value;
       };
       const manage=async({endpoint,project,archiveVersion},signal)=>{
-        if(!['archive','unarchive'].includes(endpoint))throw new Error('Unsupported project list action');
+        if(!['archive','unarchive','delete-project'].includes(endpoint))throw new Error('Unsupported project list action');
         const result=await ctx.connection.rpc.call('/foreman-next',endpoint,{project,archiveVersion},signal);
         if(!result.ok)throw new Error(result.error.message);return result.value;
       };

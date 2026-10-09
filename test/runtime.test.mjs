@@ -63,6 +63,32 @@ async function prepareExecution(h,store) {
   await h.command('reviewer',{type:'vote',round:round.id,generation:1,pass:true,findings:'Plan checked'});await h.runtime.tick();
   await h.command('coordinator',{type:'task',milestone:'a',id:'t',title:'Implement',instructions:'Implement'});
 }
+
+test('runtime creates named internal host agents and archives only drained terminal-project sessions',async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'foreman-runtime-presentation-')),store=await JournalStore.open(dir),h=harness(store);
+  const create=h.ctx.agents.create,archived=[];
+  h.ctx.agents.get=id=>h.live.get(id);
+  h.ctx.agents.create=async options=>{
+    assert.equal(options.meta.origin,'subagent');assert.equal(options.parentAgent,undefined);assert.equal(options.meta.parentSession,undefined);
+    return create(options);
+  };
+  h.ctx.sessionTitle={get:session=>session.events.find(e=>e.type==='session/title')?.data,rename:(session,title)=>{
+    session.events.push({seq:session.events.length,type:'session/title',data:{title,messageSeqs:[],source:{kind:'user'}}});
+  }};
+  h.ctx.workspaceRegistry={archivedSessionIds:archived,archiveSession:async(id,options)=>{
+    assert.equal(h.live.has(id),false);assert.deepEqual(options,{});archived.push(id);
+  }};
+  try {
+    await prepareExecution(h,store);await h.runtime.tick();
+    const records=Object.values(store.snapshot().runtimeAgents);
+    for(const r of records)assert(h.disk.get(r.sessionId).some(e=>e.type==='session/title' && e.data.title.startsWith('新工头 · p · ')));
+    assert.deepEqual(archived,[]);const histories=structuredClone([...h.disk]);
+    await h.controller.userCommand({type:'cancel',project:'p'});await h.runtime.tick();
+    assert.equal(h.live.size,0);assert.deepEqual(new Set(archived),new Set(records.map(r=>r.sessionId)));
+    assert.deepEqual([...h.disk],histories);assert.deepEqual(h.runtime.diagnostics(),[]);
+    await h.runtime.tick();assert.equal(archived.length,records.length);
+  }finally{await h.runtime.close();await store.close();await fs.rm(dir,{recursive:true,force:true});}
+});
 function harness(store,disk=new Map(),runtimeOptions={}) {
   const live=new Map();let sends=0,creates=0,resumes=0;
   const controller=new Controller(store,{captureArtifact:async()=> 'snapshot:trusted-test'});

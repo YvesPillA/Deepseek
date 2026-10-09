@@ -37,6 +37,23 @@ test('panel receipt source is host-only and limited to archive/display restore',
   assert(checked>=2);assert.equal(state.projects.p.archived,true);assert.deepEqual(state.projects.p.audit.at(-1).command.userApproval,{source:'dsh-panel-operator',questionId:'dsh-panel-action-fixture'});
   const restored=await c.prepareUserCommand({type:'unarchive',project:'p'});await c.confirmUserCommand(restored,'dsh-panel-restore-fixture',{source:'dsh-panel-operator'});
   assert.equal(state.projects.p.archived,false);assert.equal(state.projects.p.status,'delivered');
+  await c.userCommand({type:'archive',project:'p'});const removal=await c.prepareUserCommand({type:'delete-project',project:'p'});
+  await c.confirmUserCommand(removal,'dsh-panel-delete-fixture',{source:'dsh-panel-operator'});assert.equal(state.projects.p.deleted,true);
+  assert.deepEqual(state.projects.p.audit.at(-1).command.userApproval,{source:'dsh-panel-operator',questionId:'dsh-panel-delete-fixture'});
+});
+
+test('record deletion confirmations reject archive ABA, concurrent deletion and revoked operator before commit',async()=>{
+  const c=fixture();await c.userCommand(project);const manager={id:'manager'};c.bind(manager,{role:'coordinator',project:'p'});
+  await c.userCommand({type:'cancel',project:'p'});await c.userCommand({type:'archive',project:'p'});
+  const stale=await c.prepareUserCommand({type:'delete-project',project:'p'});
+  await c.userCommand({type:'unarchive',project:'p'});await c.userCommand({type:'archive',project:'p'});
+  await assert.rejects(c.confirmUserCommand(stale,'stale',{source:'dsh-panel-operator'}),/changed while awaiting/);assert.notEqual(c.view('p').deleted,true);
+  const revoked=await c.prepareUserCommand({type:'delete-project',project:'p'});let checks=0;
+  await assert.rejects(c.confirmUserCommand(revoked,'revoked',{source:'dsh-panel-operator',authorize:()=>{if(++checks===2)throw Error('Operator disposed');}}),/Operator disposed/);assert.notEqual(c.view('p').deleted,true);
+  const first=await c.prepareUserCommand({type:'delete-project',project:'p'}),second=await c.prepareUserCommand({type:'delete-project',project:'p'});
+  await c.confirmUserCommand(first,'native-delete');await assert.rejects(c.confirmUserCommand(second,'second'),/changed while awaiting/);
+  await assert.rejects(c.modelCommand(manager,{type:'final'}),/record is deleted/);await assert.rejects(c.prepareUserCommand({type:'unarchive',project:'p'}),/deleted/);
+  assert.equal(c.view('p').audit.filter(a=>a.command.type==='delete-project').length,1);
 });
 
 test('controller rejects forged identities, roles and model-provided approval fields',async()=>{
@@ -55,13 +72,17 @@ test('DSH driver creates supervisor under host ownership and handles setup commi
   const c=fixture();await c.userCommand(project);
   const calls=[];
   const host={agents:{async create(options){
+    assert.deepEqual(options.meta,{origin:'subagent',cwd:'D:/project'});
     calls.push('create');
     const agent={id:options.sessionId,session:{events:[]},followup(message){calls.push(['message',message]);this.session.events.push({type:'agent/inbox/spliced',data:{inserted:[message]}});}};
     const setup=await options.setup({agent});setup.commit();
     return {agent,async dispose(){calls.push('dispose');}};
   }},sessions:{async flush(){calls.push('flush');return true;}}};
   const driver=new DshAgentDriver(host,c,{compose:async()=>{calls.push('compose');}});
-  const agent=await driver.create({role:'reviewer',project:'p',reviewer:'r'},{cwd:'D:/project'});
+  for(const sessionMeta of [{origin:'user'},{origin:'subagent',cwd:'D:/untrusted'},{origin:'subagent',parentSession:'fake-parent'}])
+    await assert.rejects(driver.create({role:'reviewer',project:'p',reviewer:'r'},{sessionMeta}),/classification metadata/);
+  assert.equal(calls.length,0);
+  const agent=await driver.create({role:'reviewer',project:'p',reviewer:'r'},{cwd:'D:/project',sessionMeta:{origin:'subagent'}});
   assert.equal(c.identity(agent).role,'reviewer');
   await driver.send(agent,{id:'message-id',text:'Review the snapshot'});
   assert.equal(calls.at(-1),'flush');await driver.close();

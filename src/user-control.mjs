@@ -17,14 +17,14 @@ const fields={
   configure:['project','objective','reviewers'],extend:['project','milestone','additional'],
   'resume-review':['project','round'],'cancel-milestone':['project','milestone'],
   'resume-coordinator':['project','notification','reason'],
-  cancel:['project'],deliver:['project'],archive:['project'],unarchive:['project'],
+  cancel:['project'],deliver:['project'],archive:['project'],unarchive:['project'],'delete-project':['project'],
   'use-dependency-image':['project','candidate'],
   'build-dependencies':['project'],
   'recover-empty-session':['project','notification'],
 };
 const labels={create:'锁定开局设置',configure:'修改已锁定规则',extend:'追加返工机会','resume-review':'恢复技术暂停的审查',
   'resume-coordinator':'恢复停滞的执行负责人','build-dependencies':'允许联网构建依赖','recover-empty-session':'接管异常空会话',
-  'cancel-milestone':'取消里程碑',cancel:'终止项目',deliver:'确认最终交付',archive:'归档项目',unarchive:'恢复项目显示','use-dependency-image':'确认项目依赖'};
+  'cancel-milestone':'取消里程碑',cancel:'终止项目',deliver:'确认最终交付',archive:'归档项目',unarchive:'恢复项目显示','delete-project':'删除归档项目记录','use-dependency-image':'确认项目依赖'};
 
 export function describeUserCommand(command,project) {
   const lines=[labels[command.type]];
@@ -45,6 +45,8 @@ export function describeUserCommand(command,project) {
   if(command.type==='cancel')lines.push('任务将停止，已有文件保留。');
   if(['archive','unarchive'].includes(command.type))lines.push(`项目ID：${project.id}`,`当前状态：${project.status}`,
     command.type==='archive'?'将已结束项目从默认列表隐藏；项目文件、会话、审计记录和监督规则全部保留，可恢复显示。':'将归档项目恢复到默认列表；保留原来的结束状态，不重新启动任务或更改监督规则。');
+  if(command.type==='delete-project')lines.push(`项目ID：${project.id}`,`当前状态：${project.status}`,
+    '删除记录，文件保留：从当前和已归档列表移除这个项目，不再提供恢复入口。工作区文件和外层聊天不会删除；内部保留必要审计和旧项目ID，原始日志不会被擦除。');
   return lines.join('\n\n');
 }
 

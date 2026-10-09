@@ -72,6 +72,39 @@ test('archived terminal projects and their files survive journal reopen without 
   } finally {await store.close();assert.equal(path.dirname(root),path.resolve(os.tmpdir()));await fs.rm(root,{recursive:true,force:true});}
 });
 
+test('deleting archived terminal records preserves history, reserves IDs and rejects every later mutation',()=>{
+  for(const status of ['cancelled','delivered']) {
+    const f=fixture();f.plan();f.work();
+    if(status==='delivered'){f.submit();f.all();f.cmd(manager,{type:'final',artifact:'final:delete-fixture'});f.all();f.cmd(user,{type:'deliver'});}
+    else f.cmd(user,{type:'cancel'});
+    assert.throws(()=>f.cmd(user,{type:'delete-project'}),/Archive the project/);
+    f.cmd(user,{type:'archive'});const before=structuredClone(f.project());
+    for(const actor of [manager,worker,reviewer('quality')])assert.throws(()=>f.cmd(actor,{type:'delete-project'}),/User authorization/);
+    f.cmd(user,{type:'delete-project'});const deleted=f.project();
+    assert.equal(deleted.deleted,true);assert.equal(deleted.status,status);assert.equal(deleted.archived,true);assert.equal(deleted.archiveVersion,before.archiveVersion+1);assert.equal(typeof deleted.deletedAt,'string');
+    for(const field of ['workspace','reviewers','milestones','tasks','rounds','configVersion','notifications'])assert.deepEqual(deleted[field],before[field],field);
+    assert.deepEqual(deleted.audit.slice(0,-1),before.audit);assert.equal(deleted.audit.at(-1).command.type,'delete-project');
+    const exact=structuredClone(f.state());
+    for(const type of ['archive','unarchive','delete-project','configure','cancel','deliver','ack'])assert.throws(()=>f.cmd(user,{type}),/record is deleted/);
+    for(const actor of [manager,worker,reviewer('quality')])assert.throws(()=>f.cmd(actor,{type:'propose'}),/record is deleted/);
+    assert.throws(()=>transition(f.state(),user,create),/already exists/);assert.deepEqual(f.state(),exact);
+  }
+  const active=fixture();assert.throws(()=>active.cmd(user,{type:'delete-project'}),/Only cancelled or delivered/);
+});
+
+test('deleted journal tombstones survive reopen and retain user source, sessions and other projects',async()=>{
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'foreman-delete-')),journal=path.join(root,'journal'),workspace=path.join(root,'workspace'),sessions=path.join(root,'sessions');
+  await fs.mkdir(workspace);await fs.mkdir(sessions);await fs.writeFile(path.join(workspace,'source.txt'),'keep source');await fs.writeFile(path.join(sessions,'history.jsonl'),'keep chat');
+  let store=await JournalStore.open(journal);
+  try {
+    await store.dispatch(user,{...create,workspace});await store.dispatch(user,{...create,id:'other',workspace:path.join(root,'other')});const other=structuredClone(store.snapshot().projects.other);
+    for(const type of ['cancel','archive','delete-project'])await store.dispatch(user,{type,project:'p'});
+    const saved=store.snapshot();await store.close();store=await JournalStore.open(journal);assert.deepEqual(store.snapshot(),saved);assert.equal(saved.version,1);assert.deepEqual(saved.projects.other,other);
+    await assert.rejects(store.dispatch(user,{type:'unarchive',project:'p'}),/deleted/);await assert.rejects(store.dispatch(user,create),/already exists/);
+    assert.equal(await fs.readFile(path.join(workspace,'source.txt'),'utf8'),'keep source');assert.equal(await fs.readFile(path.join(sessions,'history.jsonl'),'utf8'),'keep chat');assert.equal(saved.projects.p.audit.at(-1).command.type,'delete-project');
+  } finally {await store.close();assert.equal(path.dirname(root),path.resolve(os.tmpdir()));await fs.rm(root,{recursive:true,force:true});}
+});
+
 test('new and changed plans reject cancelled dependencies without mutating state',()=>{
   const f=fixture();f.plan('a');f.plan('b');
   f.cmd(user,{type:'cancel-milestone',milestone:'a'});

@@ -10,15 +10,17 @@ import {deliveryEligibility} from './delivery-policy.mjs';
 import {ReviewMonitor} from './review-monitor.mjs';
 import {ExecutionMonitor} from './execution-monitor.mjs';
 import {reviewRunOutcome} from './review-monitor.mjs';
+import {SessionPresentation,internalSessionMeta,retiredSession} from './session-presentation.mjs';
 
 /** Explicit tick, owned by the host. No model-facing service and no background timer.
  * Production mounting remains gated on audited composition, tool guards and user UI.
  */
 export class ForemanRuntime {
   #store;#controller;#driver;#model;#live=new Map();#pump;#active;#closed=false;#recovered=false;#errors=new Map();
-  #monitor;#executionMonitor;#closing;
+  #monitor;#executionMonitor;#closing;#presentation;
   constructor(store,controller,driver,ctx,{model,reviewTimeoutMs=600000,executionTimeoutMs=null,now=Date.now}) {
     this.#store=store;this.#controller=controller;this.#driver=driver;this.#model=structuredClone(model);
+    this.#presentation=new SessionPresentation(ctx,()=>readState(store));
     this.#pump=new DeliveryPump(store,new DshTransport(store,driver,ctx,{
       resolve:job=>this.#resolve(job),lookup:job=>this.#lookup(job),
     }));
@@ -45,7 +47,11 @@ export class ForemanRuntime {
   }
   async #ensure(key,binding) {
     if(this.#closed)throw new Error('Runtime closed');
-    if(this.#live.has(key))return this.#live.get(key);
+    if(this.#live.has(key)) {
+      const agent=this.#live.get(key);
+      await this.#presentation.present(agent,readState(this.#store).runtimeAgents[key]);
+      return agent;
+    }
     const previous=readState(this.#store).runtimeAgents?.[key];
     let record=previous;
     if(!record) {
@@ -60,9 +66,10 @@ export class ForemanRuntime {
     try {
       if(fresh)await this.#store.dispatchRuntime({type:'begin-agent',key,sessionId:record.sessionId});
       agent=await this.#driver.create(record.binding,{
-        cwd:project.workspace,model:this.#model,sessionId:record.sessionId,
+        cwd:project.workspace,model:this.#model,sessionId:record.sessionId,sessionMeta:internalSessionMeta,
         ...(!fresh?{persistedSessionId:record.sessionId}:{}),
       });
+      await this.#presentation.present(agent,record);
       if(await this.#driver.checkpoint(agent))await this.#store.dispatchRuntime({type:'ready-agent',key,sessionId:record.sessionId});
       this.#live.set(key,agent);this.#errors.delete(key);
       await this.#store.dispatchRuntime({type:'incident',project:record.binding.project,key:'agent:'+key,message:null});
@@ -94,13 +101,11 @@ export class ForemanRuntime {
     for(const [key,agent] of this.#live) {
       if(this.#closed)return;
       const binding=this.#controller.identity(agent),p=readState(this.#store).projects[binding.project];
-      const finished=binding.role==='executor'?['completed','failed'].includes(p?.tasks[binding.task]?.status):
-        binding.role==='reviewer' && (p?.rounds[binding.round]?.status!=='open' ||
-          p.rounds[binding.round].votes[binding.reviewer] || (p.rounds[binding.round].attempts[binding.reviewer]??0)+1!==binding.attempt);
-      if(!p || ['cancelled','delivered'].includes(p.status) || p.configVersion!==binding.configVersion || finished) {
+      if(!p || retiredSession({binding},readState(this.#store))) {
         await this.#driver.dispose(agent);this.#live.delete(key);
       }
     }
+    await this.#archiveRetired();
     for(const job of Object.values(readState(this.#store).outbox??{})) {
       if(this.#closed)return;
       if(job.status!=='delivered' || deliveryEligibility(readState(this.#store),job)!=='ready')continue;
@@ -128,6 +133,11 @@ export class ForemanRuntime {
     await this.#monitor.poll();
     await this.#executionMonitor.poll();
     await this.#checkCoordinatorProgress();
+    if(!this.#closed)await this.#archiveRetired();
+  }
+  async #archiveRetired() {
+    for(const key of [...this.#errors.keys()])if(key.startsWith('presentation:'))this.#errors.delete(key);
+    for(const issue of await this.#presentation.archiveRetired({isActive:()=>!this.#closed})??[])this.#errors.set('presentation:'+issue.key,issue.error);
   }
   async #checkCoordinatorProgress() {
     for(const job of Object.values(readState(this.#store).outbox??{})) {

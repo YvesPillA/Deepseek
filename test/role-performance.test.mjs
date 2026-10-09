@@ -12,11 +12,11 @@ const fixture=()=>({id:'p',status:'running',configVersion:1,objective:'One compl
     open:{id:'open',status:'open',kind:'acceptance',votes:{r:{pass:true,findings:'current advice'}},generation:1,attempts:{}}},
   notifications:['Permission changed'],failures:['fault']});
 async function setup(p=fixture()) {
-  const agent={id:'c'},binding={role:'coordinator',project:'p',configVersion:1},tools=new Map();let prompt,guard;
+  const agent={id:'c',session:{surface:{replaceGeneration:0}}},binding={role:'coordinator',project:'p',configVersion:1},tools=new Map();let prompt,guard,eventListener;
   const controller={identity:subject=>{assert.equal(subject,agent);return {...binding,id:agent.id};},view:()=>structuredClone(p)};
-  const ctx={agent,get:name=>name==='tools'?{restrict(){},presentAs(){},guard:f=>guard=f,register:t=>tools.set(t.name,t)}:{section:s=>prompt=s.text}};
+  const ctx={agent,on:(name,fn)=>{assert.equal(name,'session/event');eventListener=fn;},get:name=>name==='tools'?{restrict(){},presentAs(){},guard:f=>guard=f,register:t=>tools.set(t.name,t)}:{section:s=>prompt=s.text}};
   await createRoleComposer(controller)(ctx,binding);
-  return {agent,binding,tools,prompt,guard,p};
+  return {agent,binding,tools,prompt,guard,p,event:(session,event)=>eventListener(session,event)};
 }
 
 test('coordinator summary preserves actionable requirements, failures and denial findings with complete history on demand',async()=>{
@@ -61,4 +61,34 @@ test('reviewer tools do not gain coordinator historical access or peer votes',as
   assert(!tools.has('foreman_detail'));assert.match(guard({name:'foreman_detail',agent}),/outside the locked foreman role/);
   const view=JSON.parse((await tools.get('foreman_read').execute({}, {agent})).text);
   assert.equal(view.round.votes,undefined);assert.equal(view.tasks,undefined);
+});
+
+test('incremental coordinator reads recheck exact identity, project, configuration and cancellation',async()=>{
+  const {agent,binding,tools,p}=await setup(),tool=tools.get('foreman_read');
+  const full=JSON.parse((await tool.execute({},{agent})).text),args={sinceCursor:full._read.cursor};
+  const unchanged=JSON.parse((await tool.execute(args,{agent})).text);
+  assert.equal(unchanged._read.full,false);assert.deepEqual(unchanged.changes,[]);
+  assert.equal(unchanged._read.baseCursor,full._read.cursor);
+  await assert.rejects(tool.execute(args,{agent:{id:agent.id}}),/another agent/);
+  binding.project='other';await assert.rejects(tool.execute(args,{agent}),/another assignment/);binding.project='p';
+  p.configVersion=2;await assert.rejects(tool.execute(args,{agent}),/expired/);p.configVersion=1;
+  p.status='cancelled';await assert.rejects(tool.execute(args,{agent}),/closed/);p.status='running';
+  await assert.rejects(tool.execute({sinceCursor:full._read.cursor,project:'p'},{agent}),/Invalid read/);
+  await assert.rejects(tool.execute({sinceCursor:'invalid'},{agent}),/Invalid read/);
+  assert.equal(JSON.parse((await tool.execute({sinceCursor:'f'.repeat(64)},{agent})).text)._read.full,true);
+  const another=await setup(p);
+  assert.equal(JSON.parse((await another.tools.get('foreman_read').execute(args,{agent:another.agent})).text)._read.full,true);
+  const reset=JSON.parse((await tool.execute({},{agent})).text);assert.equal(reset._read.full,true);
+  assert.deepEqual(reset.reviewers,p.reviewers);assert.deepEqual(reset.rounds.denied.votes,p.rounds.denied.votes);
+});
+
+test('turn starts, compaction summaries and surface replacement force full state after model baseline loss',async()=>{
+  const {agent,tools,event,p}=await setup(),tool=tools.get('foreman_read');
+  const read=async cursor=>JSON.parse((await tool.execute(cursor?{sinceCursor:cursor}:{},{agent})).text);
+  let full=await read();assert.equal((await read(full._read.cursor))._read.full,false);
+  event({}, {type:'compaction/summary'});assert.equal((await read(full._read.cursor))._read.full,false);
+  event(agent.session,{type:'compaction/summary'});full=await read(full._read.cursor);assert.equal(full._read.full,true);
+  event(agent.session,{type:'turn/start'});full=await read(full._read.cursor);assert.equal(full._read.full,true);
+  agent.session.surface.replaceGeneration++;const replaced=await read(full._read.cursor);assert.equal(replaced._read.full,true);
+  assert.deepEqual(replaced.reviewers,p.reviewers);assert.deepEqual(replaced.rounds.denied.votes,p.rounds.denied.votes);
 });

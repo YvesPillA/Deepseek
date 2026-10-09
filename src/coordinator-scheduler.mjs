@@ -24,6 +24,6 @@ export async function syncCoordinatorQueue(store) {
     if(readState(store).outbox?.[id])continue;
     subject.auditStart=p.audit.length;
     await store.dispatchOutbox({type:'enqueue',id,project:p.id,recipient:`coordinator:${p.id}:${p.configVersion}`,messageId:id,subject,
-      text:`你是项目 ${p.id} 的执行负责人。读取当前项目及监督意见，规划、分解任务或安排返工；独立且获批的里程碑继续推进。只通过受限工具提交计划、任务和验收申请。监督规则由用户锁定。没有可执行动作则结束本回合等待宿主唤醒，不重复读状态轮询，不提前提交尚未完成的任务。已完成任务或已关闭审查的全文仅在需要时用 foreman_detail 读取。日常进度不向用户推送；权限或重大问题通过规定通道上报。${p.coordinatorRecovery?'\n最近一次用户确认的恢复说明：'+p.coordinatorRecovery.reason:''}`});
+      text:`你是项目 ${p.id} 的执行负责人。读取当前项目及监督意见，规划、分解任务或安排返工；独立且获批的里程碑继续推进。只通过受限工具提交计划、任务和验收申请。监督规则由用户锁定。没有可执行动作则结束本回合等待宿主唤醒，不重复读状态轮询，不提前提交尚未完成的任务。保留状态基线时可用 foreman_read 的 sinceCursor 只取变化；丢失基线或上下文压缩后用 {} 重新取全量。已完成任务或已关闭审查的全文仅在需要时用 foreman_detail 读取。日常进度不向用户推送；权限或重大问题通过规定通道上报。${p.coordinatorRecovery?'\n最近一次用户确认的恢复说明：'+p.coordinatorRecovery.reason:''}`});
   }
 }

@@ -49,6 +49,26 @@ test('project execution roles and forged outer identities cannot request archive
   }
 });
 
+test('record deletion uses native human confirmation, strict fields and no startup gate',async()=>{
+  let shown,approve=false,asks=0;const f=fixture(async q=>{shown=q;asks++;return approve?yes(q):{answers:[{id:q.questions[0].id,selected:['返回调整']}]};},{canStart:()=>false});
+  await f.c.userCommand(setup);await f.c.userCommand({type:'cancel',project:'p'});
+  await assert.rejects(f.control.request(f.root,{type:'delete-project',project:'p'}),/Archive the project/);assert.equal(asks,0);
+  await f.c.userCommand({type:'archive',project:'p'});
+  for(const extra of [{deleteFiles:true},{source:'dsh-panel-operator'}])await assert.rejects(f.control.request(f.root,{type:'delete-project',project:'p',...extra}),/unexpected fields/);
+  assert.equal((await f.control.request(f.root,{type:'delete-project',project:'p'})).applied,false);assert.notEqual(f.state().projects.p.deleted,true);
+  for(const text of ['删除记录，文件保留','不再提供恢复入口','外层聊天不会删除','原始日志不会被擦除'])assert(shown.questions[0].detail.includes(text),text);
+  approve=true;assert.equal((await f.control.request(f.root,{type:'delete-project',project:'p'})).applied,true);assert.equal(f.state().projects.p.deleted,true);
+  assert.equal(f.state().projects.p.audit.at(-1).command.userApproval.source,'dsh-user-questions');
+  await assert.rejects(f.control.request(f.root,{type:'unarchive',project:'p'}),/deleted/);assert.equal(asks,2);
+});
+
+test('execution identities cannot delete records even when bound as outer roots',async()=>{
+  for(const role of ['coordinator','executor','reviewer']) {
+    let asks=0;const f=fixture(async q=>{asks++;return yes(q);});await f.c.userCommand(setup);await f.c.userCommand({type:'cancel',project:'p'});await f.c.userCommand({type:'archive',project:'p'});
+    f.c.bind(f.root,{role,project:'p',...(role==='reviewer'?{reviewer:'r'}:{})});await assert.rejects(f.control.request(f.root,{type:'delete-project',project:'p'}),/cannot act/);assert.equal(asks,0);assert.notEqual(f.state().projects.p.deleted,true);
+  }
+});
+
 test('approved setup records the exact reviewed configuration and human question reference',async()=>{
   let shown;const f=fixture(async request=>{shown=request;return yes(request);});
   assert.equal((await f.control.request(f.root,setup)).applied,true);
