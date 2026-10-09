@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRoleComposer} from '../src/role-tools.mjs';
+import {initialState,transition} from '../src/core.mjs';
+import {planReviewDeliveries,reviewPhaseInstruction} from '../src/review-scheduler.mjs';
 
 const fixture=()=>({id:'p',status:'running',configVersion:1,objective:'One complete SVG',audit:['internal'],
   reviewers:[{id:'r',responsibility:'Animation',criteria:'Exact requirements'}],
@@ -91,4 +93,61 @@ test('turn starts, compaction summaries and surface replacement force full state
   event(agent.session,{type:'turn/start'});full=await read(full._read.cursor);assert.equal(full._read.full,true);
   agent.session.surface.replaceGeneration++;const replaced=await read(full._read.cursor);assert.equal(replaced._read.full,true);
   assert.deepEqual(replaced.reviewers,p.reviewers);assert.deepEqual(replaced.rounds.denied.votes,p.rounds.denied.votes);
+});
+
+test('passed closed round payloads are available on demand while unresolved and denied material stays inline',async()=>{
+  const p=fixture();
+  Object.assign(p,{denialLimit:3,patrolEvery:3,faultRetries:3});
+  p.rounds.passed.outcome='passed';p.rounds.passed.payload={artifact:'sha256:accepted',planVersion:1};
+  p.rounds.plan={id:'plan',kind:'plan',status:'closed',outcome:'passed',payload:{definition:{id:'m',criteria:'Approved complete definition',deps:[]}},votes:{r:{pass:true,findings:'Approved'}}};
+  p.rounds.denied.outcome='rejected';p.rounds.denied.payload={definition:{id:'m',criteria:'Must fix missing tests'}};
+  p.rounds.open.payload={artifact:'sha256:current',planVersion:1};
+  p.rounds.faulted={id:'faulted',kind:'change',status:'faulted',payload:{definition:{criteria:'Pending technical recovery'}},votes:{}};
+  p.rounds.unknown={id:'unknown',kind:'plan',status:'closed',payload:{definition:{criteria:'No recorded outcome'}},votes:{}};
+  const original=structuredClone(p),{agent,tools}=await setup(p);
+  const view=JSON.parse((await tools.get('foreman_read').execute({},{agent})).text);
+  for(const id of ['passed','plan']) {
+    assert.equal(view.rounds[id].payload,undefined);
+    assert.deepEqual(view.rounds[id].detail,{kind:'round',id,hasPayload:true});
+    assert.deepEqual(JSON.parse((await tools.get('foreman_detail').execute({kind:'round',id},{agent})).text),original.rounds[id]);
+  }
+  for(const id of ['denied','open','faulted','unknown'])assert.deepEqual(view.rounds[id].payload,original.rounds[id].payload);
+  for(const key of ['objective','reviewers','milestones','denialLimit','patrolEvery','faultRetries'])assert.deepEqual(view[key],original[key]);
+  assert.deepEqual(view.tasks.running,original.tasks.running);
+  assert.deepEqual(p,original,'projection must never mutate live state or historical payloads');
+});
+
+test('real core settlement marks accepted planning and acceptance payloads with outcome passed',async()=>{
+  const user={role:'user'},manager={role:'coordinator',project:'p',id:'c'},reviewer={role:'reviewer',project:'p',reviewer:'r',id:'r'},worker={role:'executor',project:'p',id:'w'};
+  let state=transition(initialState(),user,{type:'create',id:'p',workspace:'D:/fixture',objective:'Deliver exact scope',reviewers:[{id:'r',name:'Review',responsibility:'Quality',criteria:'Working and verified'}]});
+  const command=(actor,c)=>state=transition(state,actor,{project:'p',...c});
+  const latest=()=>Object.values(state.projects.p.rounds).at(-1);
+  const approve=()=>command(reviewer,{type:'vote',round:latest().id,generation:latest().generation,pass:true,findings:'Inspected exact material'});
+  command(manager,{type:'propose',definition:{id:'m',title:'Complete task',criteria:'Working and verified',deps:[]}});approve();
+  const plan=structuredClone(latest());assert.equal(plan.outcome,'passed');assert.equal(plan.passed,undefined);
+  command(manager,{type:'task',milestone:'m',id:'t',title:'Implement',instructions:'Implement and verify'});
+  command(manager,{type:'assign',task:'t',agentId:'w'});command(worker,{type:'complete',task:'t',result:'Implemented and verified'});
+  command(manager,{type:'submit',milestone:'m',artifact:'sha256:exact'});approve();
+  const acceptance=structuredClone(latest());assert.equal(acceptance.outcome,'passed');
+  const p=state.projects.p,original=structuredClone(p),{agent,tools}=await setup(p);
+  const view=JSON.parse((await tools.get('foreman_read').execute({},{agent})).text);
+  for(const round of [plan,acceptance]) {
+    assert.equal(view.rounds[round.id].payload,undefined);assert.equal(view.rounds[round.id].detail.hasPayload,true);
+    assert.deepEqual(JSON.parse((await tools.get('foreman_detail').execute({kind:'round',id:round.id},{agent})).text),round);
+  }
+  assert.deepEqual(view.reviewers,original.reviewers);assert.equal(view.denialLimit,3);assert.equal(view.patrolEvery,3);assert.equal(view.faultRetries,3);
+  assert.deepEqual(view.milestones,original.milestones);assert.deepEqual(p,original);
+});
+
+test('review wakeups retain assignment and refer to unchanged authoritative phase instructions without duplicating them',()=>{
+  for(const kind of ['plan','change','acceptance','patrol','final']) {
+    const p=fixture();p.rounds={open:{...p.rounds.open,kind,votes:{},milestone:'m',payload:{planVersion:1}}};
+    p.milestones.m.status=kind==='final'?'passed':'review';p.milestones.m.planVersion=1;
+    const [job]=planReviewDeliveries({projects:{p}});assert(job,kind);
+    assert(job.text.includes('foreman_read'));assert(job.text.includes('generation=1'));assert(job.text.includes('kind='+kind));
+    assert(job.text.includes('监督者 r'));assert(job.text.includes('轮次 open'));assert(job.text.includes('foreman_command 提交 vote'));
+    assert(job.text.includes('角色系统说明'));assert(job.text.includes('phaseInstruction'));
+    assert(!job.text.includes(reviewPhaseInstruction(kind)));
+    assert.deepEqual(p.reviewers,fixture().reviewers);
+  }
 });

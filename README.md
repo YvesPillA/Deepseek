@@ -30,7 +30,7 @@ DeepSeek Harness 的项目协作模式：**执行代理负责做，监督代理�
 
 ## 更多说明
 
-- [效率优化与参考资料](https://github.com/YvesPillA/Deepseek/blob/main/docs/efficiency.md)
+- [效率机制](https://github.com/YvesPillA/Deepseek/blob/main/docs/efficiency.md) · [真实 A/B 数据](https://github.com/YvesPillA/Deepseek/blob/main/docs/efficiency-benchmarks.md) · [研究依据](https://github.com/YvesPillA/Deepseek/blob/main/docs/efficiency-research.md)
 - [架构、验证边界与回滚](https://github.com/YvesPillA/Deepseek/blob/main/docs/engineering.md)
 
 仓库仅包含插件源码、测试和开发工具，不包含账号密钥、用户会话、工作项目或本机发布凭据。

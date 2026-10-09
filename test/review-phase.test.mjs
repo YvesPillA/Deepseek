@@ -15,7 +15,7 @@ test('planning reviewers receive plan criteria without artifact or execution-evi
   const ctx={agent,get:name=>name==='tools'?{restrict(){},presentAs(){},guard(){},register:t=>tools.set(t.name,t)}:{section:s=>prompt=s.text}};
   await createRoleComposer(controller,{artifacts:{},verification:{}})(ctx,binding);
   assert.deepEqual([...tools.keys()],['foreman_read','foreman_command']);
-  assert(prompt.includes('代码尚未开始实现'));
+  assert((typeof prompt==='function'?prompt({}):prompt).includes('代码尚未开始实现'));
   const read=JSON.parse((await tools.get('foreman_read').execute({}, {agent})).text);
   assert.equal(read.round.kind,'plan');assert(read.phaseInstruction.includes('没有制品快照和执行证据是正常的'));
   assert(planReviewDeliveries(state)[0].text.includes('kind=plan'));assert(!planReviewDeliveries(state)[0].text.includes('这是成品验收'));
@@ -35,7 +35,7 @@ test('stage review exposes the current milestone and future dependencies without
   assert.deepEqual(read.currentMilestone,p.milestones.m1);
   assert.deepEqual(read.milestones.m2.deps,['m1']);
   assert.equal(read.round.votes,undefined);
-  assert(prompt.includes('不是项目最终验收'));
+  assert((typeof prompt==='function'?prompt({}):prompt).includes('不是项目最终验收'));
   assert(read.phaseInstruction.includes('不得仅因明确归属后续里程碑'));
   assert(tools.has('foreman_evidence'));assert(tools.has('foreman_artifact'));
   assert(!reviewPhaseInstruction('final').includes('后续里程碑'));
