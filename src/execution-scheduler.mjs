@@ -3,7 +3,7 @@ import {createHash} from 'node:crypto';
 
 export const EXECUTION_PROTOCOL='foreman-execution-v1';
 const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
-const active=p=>p?.status==='running';
+const active=p=>p?.status==='running' && !p.paused;
 const ready=(p,m)=>m?.status==='work' && m.deps.every(id=>p.milestones[id]?.status==='passed');
 
 /** Tasks are assigned through Controller.assign after a real executor is created.
@@ -19,6 +19,7 @@ export function pendingAssignments(state) {
 export function executionEligibility(state,job) {
   const s=job.subject;if(s?.protocol!==EXECUTION_PROTOCOL)return 'unmanaged';
   const p=state.projects[job.project],t=p?.tasks[s.task],m=p?.milestones[s.milestone];
+  if(p?.paused)return 'blocked';
   if(!active(p)||!t||!m||t.status!=='running'||t.assigned!==job.recipient||t.milestone!==s.milestone)return 'stale';
   if(p.configVersion!==s.configVersion||m.planVersion!==s.planVersion||t.configVersion!==s.configVersion||t.planVersion!==s.planVersion)return 'stale';
   if((t.attempt??1)!==(s.taskAttempt??1))return 'stale';

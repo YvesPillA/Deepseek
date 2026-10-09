@@ -44,7 +44,7 @@ export function createOuterComposer(control,{snapshot}) {
         '调整规则：{type:"configure",project,objective?,reviewers?}；追加机会：{type:"extend",project,milestone,additional}；恢复技术暂停审查：{type:"resume-review",project,round}；'+
         '恢复无进展的负责人：{type:"resume-coordinator",project,notification:故障通知ID,reason:恢复说明}；'+
         '创建中断且无持久内容的空会话：{type:"recover-empty-session",project,notification:代理会话故障通知ID}，原生确认后才会停止旧代理并替换会话，保留现有文件和规则。已有日志内容不能使用此入口。'+
-        '取消里程碑：{type:"cancel-milestone",project,milestone}；终止：{type:"cancel",project}；最终交付：{type:"deliver",project}。每项均须原生确认，最终交付还须全员验收通过。'+
+        '用户在对话中说暂停、继续或取消项目时，读取foreman_status确定项目ID并直接提交相应原生确认卡，不要求用户手工填写JSON。项目不明确且存在多个候选时才澄清。暂停：{type:"pause",project}；继续：{type:"resume",project}；终止：{type:"cancel",project}；取消里程碑：{type:"cancel-milestone",project,milestone}；最终交付：{type:"deliver",project}。每项均须原生确认，最终交付还须全员验收通过。暂停保留现有文件、已完成任务、已投票和否决次数，必须排空代理后才能继续；取消是终态，不能继续。'+
         '隐藏已结束项目：{type:"archive",project}；恢复归档项目显示：{type:"unarchive",project}。仅适用于已取消或已交付项目，均须原生确认。归档只从默认列表隐藏，保留项目文件、会话和审计；恢复显示不重新启动任务，也不能复用旧项目ID。'+
         '删除已归档项目记录：{type:"delete-project",project}，须原生确认。仅适用于已归档且已取消或已交付项目；从当前和归档列表移除且不能恢复，保留工作区文件、外层聊天、必要内部审计及旧ID，不擦除原始日志。'+
         '依赖权限申请：先用 foreman_dependency_candidates 列出宿主准备目录中的候选 ID（列出不代表已批准或可用），再用 {type:"use-dependency-image",project,candidate} 请求用户确认。没有匹配候选时，可用 {type:"build-dependencies",project} 申请联网构建锁定依赖，原生确认后才会开始，最长10分钟。构建完成只生成候选，使用仍需单独确认。构建结果不明时用 foreman_dependency_recover 核对状态，该工具不会重新构建。未配置构建服务则向用户报告，不自行编造镜像或确认记录。'

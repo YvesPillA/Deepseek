@@ -23,6 +23,7 @@ function freshCreateId(command,projects) {
 }
 const approvalBasis=p=>p?JSON.stringify({status:p.status,configVersion:p.configVersion,objective:p.objective,workspace:p.workspace,
   archived:p.archived===true,deleted:p.deleted===true,archiveVersion:p.archiveVersion??0,
+  paused:p.paused===true,pauseStatus:p.pauseStatus,controlVersion:p.controlVersion??0,
   coordinatorWake:p.coordinatorWake,
   reviewers:p.reviewers,milestones:p.milestones,rounds:Object.values(p.rounds).map(r=>({id:r.id,status:r.status,generation:r.generation}))}):null;
 
@@ -34,7 +35,7 @@ export class Controller {
   #store; #bindings = new WeakMap(); #live = new Map(); #capture; #serial = Promise.resolve();
   #validateWorkspace;#prepareWorkspace;#confirmWorkspace;
   #closing;#closed=false;
-  #prepared=new WeakMap();
+  #prepared=new WeakMap();#quiescer;
   constructor(store, { captureArtifact, validateWorkspace, prepareWorkspace, confirmWorkspace }) {
     ensure(!!prepareWorkspace===!!confirmWorkspace,'Workspace preparation and confirmation must be configured together');
     this.#store = store; this.#capture = captureArtifact;this.#validateWorkspace=validateWorkspace;
@@ -47,7 +48,7 @@ export class Controller {
     ensure(!this.#bindings.has(agent), 'Agent already bound');
     const p = this.view(binding.project);
     if(binding.role === 'reviewer') ensure(p.reviewers.some(r=>r.id===binding.reviewer), 'Reviewer is not in locked roster');
-    const principal = Object.freeze({...structuredClone(binding),id:agent.id});
+    const principal = Object.freeze({...structuredClone(binding),controlVersion:binding.controlVersion??p.controlVersion??0,id:agent.id});
     ensure(!this.#live.has(agent.id), 'Agent identity already resident');
     this.#bindings.set(agent,principal); this.#live.set(agent.id,agent);
     return () => {this.#bindings.delete(agent); if(this.#live.get(agent.id)===agent)this.#live.delete(agent.id);};
@@ -59,6 +60,22 @@ export class Controller {
   }
   view(project) {return projectView(readState(this.#store),project);}
   viewFor(agent) { return this.view(this.identity(agent).project); }
+  setProjectQuiescer(quiesce) {
+    ensure(typeof quiesce==='function','Host project quiescer required');
+    this.#quiescer=quiesce;return ()=>{if(this.#quiescer===quiesce)this.#quiescer=undefined;};
+  }
+  async #drain(project,version) {
+    ensure(this.#quiescer,'Project stopping runtime is unavailable; pause remains requested');
+    try {await this.#quiescer(project,version);}
+    catch(cause){throw Error('暂停/停止已请求，但代理排空失败；暂不可恢复。'+cause.message,{cause});}
+  }
+  async #afterControl(command,result) {
+    if(command.type==='pause' || command.type==='cancel' && this.#quiescer) {
+      await this.#drain(command.project,result.projects[command.project].controlVersion);
+      return this.#store.snapshot();
+    }
+    return result;
+  }
   #serialize(fn) {
     if(this.#closing || this.#closed)return Promise.reject(new Error('Controller is closing or closed'));
     const op = this.#serial.then(fn); this.#serial = op.catch(()=>{}); return op;
@@ -71,12 +88,16 @@ export class Controller {
   async userCommand(command) {
     // Never bind this method to a model-facing tool or unauthenticated HTTP endpoint.
     const frozen=structuredClone(command);
-    return this.#serialize(async()=>{
+    let resumeVersion;
+    if(frozen.type==='resume') {const p=this.view(frozen.project);resumeVersion=p.controlVersion;await this.#drain(frozen.project,resumeVersion);}
+    const result=await this.#serialize(async()=>{
+      if(frozen.type==='resume')ensure(this.view(frozen.project).controlVersion===resumeVersion,'Project changed while stopping');
       freshCreateId(frozen,this.#store.snapshot().projects);
       if(frozen.type==='create' && this.#validateWorkspace)
         frozen.workspace=await this.#validateWorkspace(frozen.workspace,this.#store.snapshot().projects);
       return this.#store.dispatch({role:'user'},frozen);
     });
+    return this.#afterControl(frozen,result);
   }
   prepareUserCommand(raw) {
     const command=structuredClone(raw);
@@ -94,12 +115,18 @@ export class Controller {
       return ticket;
     });
   }
-  confirmUserCommand(ticket,questionId,{authorize=()=>{},source='dsh-user-questions'}={}) {
-    return this.#serialize(async()=>{
+  async confirmUserCommand(ticket,questionId,{authorize=()=>{},source='dsh-user-questions'}={}) {
+    const proposal=this.#prepared.get(ticket);authorize();
+    if(proposal?.command.type==='resume') {
+      const p=this.#store.snapshot().projects[proposal.command.project];
+      ensure(approvalBasis(p)===proposal.basis,'Project changed while awaiting confirmation; review the updated proposal');
+      await this.#drain(p.id,p.controlVersion);authorize();
+    }
+    const result=await this.#serialize(async()=>{
       authorize();
       const prepared=this.#prepared.get(ticket);ensure(prepared,'Unknown or consumed user confirmation');
       ensure(['dsh-user-questions','dsh-panel-operator'].includes(source),'Unknown human confirmation source');
-      ensure(source!=='dsh-panel-operator' || ['archive','unarchive','delete-project'].includes(prepared.command.type),'Panel operator confirmation is limited to project archive, display restore and record deletion');
+      ensure(source!=='dsh-panel-operator' || ['archive','unarchive','delete-project','pause','resume','cancel'].includes(prepared.command.type),'Panel operator confirmation is limited to project controls');
       this.#prepared.delete(ticket);
       const command=structuredClone(prepared.command),state=this.#store.snapshot();
       ensure(approvalBasis(state.projects[command.project??command.id])===prepared.basis,'Project changed while awaiting confirmation; review the updated proposal');
@@ -113,17 +140,19 @@ export class Controller {
       command.userApproval={source,questionId};
       return this.#store.dispatch({role:'user'},command);
     });
+    return this.#afterControl(proposal.command,result);
   }
   executorFiles(agent, operation) {
     // The same queue orders state changes, file mutations and capture+review commit.
     // operation is a trusted host closure, never code supplied by a model.
     return this.#serialize(async()=>{
       const actor=this.identity(agent),p=this.view(actor.project),t=p.tasks[actor.task],m=p.milestones[t?.milestone];
+      ensure(actor.controlVersion===(p.controlVersion??0),'Project control authorization has expired');
       ensure(actor.role==='executor' && t?.status==='running' && t.assigned===actor.id,'No active task ownership');
       ensure((actor.taskAttempt??1)===(t.attempt??1),'Task attempt has expired');
       ensure(actor.configVersion===p.configVersion && t.configVersion===p.configVersion &&
         actor.planVersion===m?.planVersion && t.planVersion===m.planVersion,'Task version has expired');
-      ensure(p.status==='running' && m.status==='work' && m.deps.every(id=>p.milestones[id].status==='passed'),'Task is not executable');
+      ensure(!p.paused && p.status==='running' && m.status==='work' && m.deps.every(id=>p.milestones[id].status==='passed'),'Task is not executable');
       if(this.#validateWorkspace)await this.#validateWorkspace(p.workspace,this.#store.snapshot().projects,p.id);
       return operation(p);
     });
@@ -133,6 +162,7 @@ export class Controller {
     return this.#serialize(async()=>{
       const p=this.view(project);
       ensure(p && !['cancelled','delivered'].includes(p.status),'Project is closed or absent');
+      ensure(!p.paused,'Project is paused');
       if(this.#validateWorkspace)await this.#validateWorkspace(p.workspace,this.#store.snapshot().projects,p.id);
       return operation({project:p,store:this.#store,capture:()=>this.#capture(p)});
     });
@@ -144,6 +174,8 @@ export class Controller {
       const project=this.view(actor.project);
       ensure(project.deleted!==true,'Project record is deleted');
       ensure(project.archived!==true,'Project is archived; restore its display first');
+      ensure(!project.paused,'Project is paused');
+      ensure(actor.controlVersion===(project.controlVersion??0),'Project control authorization has expired');
       if(actor.configVersion!==undefined)ensure(actor.configVersion===project.configVersion,'Agent configuration has expired');
       if(actor.role==='executor' && actor.task!==undefined)ensure(command.task===actor.task,'Executor is bound to another task');
       if(actor.role==='reviewer' && actor.round!==undefined) {
@@ -177,6 +209,7 @@ export class Controller {
       const a=this.identity(coordinator), b=this.identity(worker);
       ensure(a.role==='coordinator' && b.role==='executor' && a.project===b.project, 'Invalid delegation');
       const p=this.view(a.project);
+      ensure(!p.paused && a.controlVersion===(p.controlVersion??0) && b.controlVersion===(p.controlVersion??0),'Project delegation control has expired');
       ensure((a.configVersion===undefined || a.configVersion===p.configVersion) && (b.configVersion===undefined || b.configVersion===p.configVersion),'Delegation configuration has expired');
       ensure(b.task===undefined || b.task===task,'Executor is bound to another task');
       ensure((b.taskAttempt??1)===(p.tasks[task]?.attempt??1),'Delegation attempt has expired');
@@ -193,7 +226,7 @@ export class Controller {
     return this.#serialize(async()=>{
       const actor=this.identity(agent);ensure(actor.role==='reviewer','Reviewer required');
       const p=this.view(actor.project),r=p.rounds[round];
-      if(!r || !['running','final-review'].includes(p.status) || r.status!=='open' || r.votes[actor.reviewer] ||
+      if(p.paused || !r || !['running','final-review'].includes(p.status) || r.status!=='open' || r.votes[actor.reviewer] ||
         p.configVersion!==actor.configVersion || actor.round!==round || actor.generation!==generation || actor.attempt!==attempt ||
         r.generation!==generation || (r.attempts[actor.reviewer]??0)+1!==attempt)return false;
       await this.#store.dispatch(actor,{type:'review-fault',project:actor.project,round,generation,attempt,error});return true;
@@ -206,7 +239,7 @@ export class Controller {
     await stop();
     return this.#serialize(async()=>{
       const p=this.view(actor.project),t=p.tasks[task];
-      if(p.status!=='running' || !t || t.status!=='running' || t.assigned!==actor.id ||
+      if(p.paused || p.status!=='running' || !t || t.status!=='running' || t.assigned!==actor.id ||
         (t.attempt??1)!==taskAttempt || (actor.taskAttempt??1)!==taskAttempt || t.configVersion!==p.configVersion || actor.configVersion!==p.configVersion ||
         t.planVersion!==p.milestones[t.milestone].planVersion)return false;
       await this.#store.dispatch(actor,{type:'task-fault',project:actor.project,task,taskAttempt,error});return true;

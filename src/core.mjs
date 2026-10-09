@@ -136,8 +136,22 @@ export function transition(previous, actor, command) {
     } else {
     check(p.archived!==true,'Project is archived; restore its display first');
     check(!['cancelled','delivered'].includes(p.status), 'Project is closed');
+    check(!p.paused || ['resume','cancel','ack'].includes(kind),'Project is paused');
     const m = command.milestone ? p.milestones[command.milestone] : null;
-    if (kind === 'propose') {
+    if(kind==='pause') {
+      user();check(['running','final-review','approved'].includes(p.status),'Project cannot be paused');
+      p.paused=true;p.pauseStatus='requested';p.controlVersion=(p.controlVersion??0)+1;
+    } else if(kind==='resume') {
+      user();check(p.paused===true && p.pauseStatus==='drained','Project pause has not finished draining');
+      for(const t of Object.values(p.tasks))if(['pending','running'].includes(t.status)) {
+        t.attempt=(t.attempt??1)+1;t.status='pending';t.assigned=null;t.result=null;
+      }
+      // Keep authenticated votes for the same immutable review material. Only
+      // unfinished open work gets a fresh generation and delivery identity.
+      for(const r of Object.values(p.rounds))if(r.status==='open')r.generation++;
+      p.paused=false;delete p.pauseStatus;p.controlVersion=(p.controlVersion??0)+1;
+      p.coordinatorWake=(p.coordinatorWake??0)+1;
+    } else if (kind === 'propose') {
       manager(); check(p.status === 'running', 'Project is not running');
       const def = definition(command.definition);
       validateDependencies(p, def);
@@ -272,7 +286,7 @@ export function transition(previous, actor, command) {
       p.coordinatorWake=(p.coordinatorWake??0)+1;
       p.coordinatorRecovery={notification:command.notification,reason:command.reason};
       incident[1].message=null;n.resolved=true;n.acknowledged=true;
-    } else if (kind === 'cancel') { user(); p.status = 'cancelled'; }
+    } else if (kind === 'cancel') { user(); p.status = 'cancelled';p.paused=false;delete p.pauseStatus;p.controlVersion=(p.controlVersion??0)+1; }
     else if (kind === 'ack') { user(); const n = p.notifications.find(n => n.id === command.notification); check(n, 'Unknown notification'); n.acknowledged = true; }
     else if (kind === 'deliver') { user(); check(p.status === 'approved', 'Final approval is required'); p.status = 'delivered'; }
     else throw new Error(`Unsupported command: ${kind}`);

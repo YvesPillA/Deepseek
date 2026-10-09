@@ -10,11 +10,13 @@ import {createManagedRuntime} from './managed-runtime.mjs';
 import {SessionRecovery} from './session-recovery.mjs';
 import {readinessSnapshot} from './readiness.mjs';
 import {verifyReleaseApproval} from './release-approval.mjs';
+import {ProjectProgress} from './project-progress.mjs';
+import {readState} from './state-reader.mjs';
 
 export const name = 'foreman-next';
 export const inject = ['agents','sessions'];
 
-/** Host-plane plugin entry. Exposes only authenticated terminal-card actions, never a general user-command RPC or shell.
+/** Host-plane plugin entry. Exposes only authenticated project-control actions, never a general user-command RPC or shell.
  * Runtime composition and UI authorization are integration gates, not prompt assertions.
  * All methods below are trusted same-process capabilities; never publish them through
  * Creator-mode service inspection to execution/observer agents.
@@ -36,18 +38,19 @@ async function mountHost(ctx,config,options) {
     dshHome:config.dshHome,storageRoot:config.storageRoot,verificationImage:config.verification?.image,
     verificationBackend:config.verification?.backend??'docker'});
   const {store,controller}=application;
+  const progress=new ProjectProgress(ctx,()=>readState(store));
   let userControl,scheduler,sessionContext,dashboardConnected=false,projectManagementConnected=false;
   const recovery=new SessionRecovery({controller,store,context:()=>{if(!sessionContext)throw Error('Session persistence is unavailable');return sessionContext;},
     maintenance:operation=>{if(!scheduler)throw Error('Runtime scheduler is unavailable');return scheduler.runStopped(operation);}});
   const service = Object.freeze({
     list: () => Object.values(store.snapshot().projects).filter(p=>!p.archived && !p.deleted).map(p=>({id:p.id,objective:p.objective,status:p.status,notificationCount:p.notifications.filter(n=>!n.acknowledged&&n.kind!=='record').length})),
     view: id => controller.view(id),
-    snapshot:()=>dashboardSnapshot(store.snapshot(),service.readiness()),
+    snapshot:()=>{const state=store.snapshot();return dashboardSnapshot(state,service.readiness(),progress.snapshot(state));},
     readiness: () => readinessSnapshot({application,scheduler,sessionContext,userControl,dashboardConnected,projectManagementConnected,agentOptions:config.scheduler?.agentOptions,releaseApproval}),
   });
   try {
     ctx.provide('foremanNext',service);
-    ctx.effect(() => async()=>{userControl?.close();try{await application.verification?.close();}finally{try{await scheduler?.close();}finally{await application.close();}}}, 'foreman-next.close');
+    ctx.effect(() => async()=>{userControl?.close();try{await progress.close();await application.verification?.close();}finally{try{await scheduler?.close();}finally{await application.close();}}}, 'foreman-next.close');
     ctx.inject(['sessionPersistence'],runtimeCtx=>{
       sessionContext={agents:runtimeCtx.get('agents'),sessionPersistence:runtimeCtx.get('sessionPersistence')};
       const options=config.scheduler??{};
@@ -72,28 +75,30 @@ async function mountHost(ctx,config,options) {
     ctx.inject(['connection','webServer'],connectionCtx=>{
       const connection=connectionCtx.root.get('connection'),operator=connection.operator;
       const lifetime=new AbortController();
-      // Only the authenticated operator carrier may alter terminal-project
-      // display metadata. No general controller or model command is exposed.
-      const action=type=>async({project,archiveVersion},signal,peer)=>{
+      // Only the authenticated operator can confirm these explicit actions.
+      // No general controller or model command is exposed.
+      const action=type=>async(payload,signal,peer)=>{
+        const {project}=payload,version=['pause','resume','cancel'].includes(type)?'controlVersion':'archiveVersion';
         const combined=signal?AbortSignal.any([signal,lifetime.signal]):lifetime.signal;
         const authorize=()=>{
           combined.throwIfAborted();
           if(!operator || peer!==operator || connection.operator!==operator || typeof operator.ctx?.fiber?.assertActive!=='function')throw Error('Authenticated operator required');
           operator.ctx.fiber.assertActive();
-          if((controller.view(project).archiveVersion??0)!==archiveVersion)throw Error('项目显示状态已改变，请刷新后重试。');
+          if((controller.view(project)[version]??0)!==payload[version])throw Error('项目状态已改变，请刷新后重试。');
         };
         authorize();
         const ticket=await controller.prepareUserCommand({type,project});
         await controller.confirmUserCommand(ticket,'foreman-panel-'+randomUUID(),{authorize,source:'dsh-panel-operator'});
       };
       const actions=operator && typeof operator.ctx?.fiber?.assertActive==='function'
-        ?{operator,archive:action('archive'),unarchive:action('unarchive'),'delete-project':action('delete-project')}:undefined;
+        ?{operator,archive:action('archive'),unarchive:action('unarchive'),'delete-project':action('delete-project'),
+          pause:action('pause'),resume:action('resume'),cancel:action('cancel')}:undefined;
       const dispose=connection.rpc.handle('/foreman-next',dashboardHandler(service.snapshot,()=>alertSnapshot(store.snapshot()),actions));
       dashboardConnected=true;
       projectManagementConnected=!!actions;
       connectionCtx.effect(()=>async()=>{lifetime.abort(new Error('Dashboard scope disposed'));dashboardConnected=false;projectManagementConnected=false;await dispose();},'foreman-next.dashboard');
     });
-  } catch(e) {await application.close();throw e;}
+  } catch(e) {await progress.close();await application.close();throw e;}
 }
 
 export { Controller, DshAgentDriver };

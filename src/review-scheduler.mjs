@@ -16,7 +16,7 @@ export function reviewPhaseInstruction(kind) {
 export function planReviewDeliveries(state) {
   const jobs=[];
   for(const p of Object.values(state.projects)) {
-    if(!['running','final-review'].includes(p.status))continue;
+    if(p.paused || !['running','final-review'].includes(p.status))continue;
     for(const r of Object.values(p.rounds)) {
       if(r.status!=='open')continue;
       for(const reviewer of p.reviewers) {
@@ -40,6 +40,7 @@ export function reviewEligibility(state,job) {
   const s=job.subject;
   if(s?.protocol!==REVIEW_PROTOCOL)return 'unmanaged';
   const p=state.projects[job.project];
+  if(p?.paused)return 'blocked';
   if(!p || !['running','final-review'].includes(p.status) || p.configVersion!==s.configVersion)return 'stale';
   const r=p.rounds[s.round];
   if(!r || r.generation!==s.generation || !p.reviewers.some(v=>v.id===s.reviewer) || Object.hasOwn(r.votes,s.reviewer))return 'stale';

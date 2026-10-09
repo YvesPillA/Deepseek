@@ -58,6 +58,8 @@ export function createRoleComposer(controller,{artifacts,files,verification}={})
       check(exec.agent===agent,'Tool belongs to another agent');
       const actor=controller.identity(agent),p=controller.view(actor.project);
       check(!['cancelled','delivered'].includes(p.status),'Project is closed');
+      check(!p.paused,'Project is paused');
+      check(actor.controlVersion===(p.controlVersion??0),'Project control authorization has expired');
       check(actor.configVersion===undefined || actor.configVersion===p.configVersion,'Agent configuration has expired');
       if(actor.role==='reviewer' && actor.round) {
         const r=p.rounds[actor.round];

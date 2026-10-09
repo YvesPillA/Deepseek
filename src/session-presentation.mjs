@@ -19,7 +19,8 @@ export function internalSessionTitle(binding,project) {
 export function retiredSession(record,state) {
   const b=record?.binding,p=state.projects?.[b?.project];
   if(!p || !['coordinator','executor','reviewer'].includes(b.role))return false;
-  if(p.archived===true || ['cancelled','delivered'].includes(p.status) || p.configVersion!==b.configVersion)return true;
+  if(p.paused || p.archived===true || ['cancelled','delivered'].includes(p.status) || p.configVersion!==b.configVersion ||
+    (p.controlVersion??0)!==(b.controlVersion??0))return true;
   if(b.role==='executor') {
     const t=p.tasks?.[b.task];
     return !t || ['completed','failed'].includes(t.status) || (t.attempt??1)!==(b.taskAttempt??1) ||

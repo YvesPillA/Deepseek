@@ -143,14 +143,14 @@ test('old executor remains bound to its deleted project and cannot write into a 
     // This write was accepted into the queue while cancel had not yet settled.
     // Its ownership must be rechecked when it actually reaches the barrier.
     const queued=f.app.files.run(executor,{action:'write',path:'queued.svg',text:'old in-flight write',expectedHash:null});
-    const refused=assert.rejects(queued,/not executable/);await cancelled;await refused;await absent(path.join(f.work,'queued.svg'));
+    const refused=assert.rejects(queued,/not executable|control authorization has expired/);await cancelled;await refused;await absent(path.join(f.work,'queued.svg'));
     for(const type of ['archive','delete-project'])await c.userCommand({type,project:'p'});const old=c.view('p');
     const next=await c.prepareUserCommand(create('p',f.work));assert.equal(next.workspaceWillBeCreated,false);
     await c.confirmUserCommand(next,'reuse-existing');assert.equal(c.identity(executor).project,'p');
     const commands=[{action:'write',path:'sample.svg',text:'obsolete overwrite',expectedHash:first.hash},
       {action:'write',path:'new.svg',text:'obsolete create',expectedHash:null},
       {action:'delete',path:'sample.svg',expectedHash:first.hash}];
-    for(const command of commands)await assert.rejects(f.app.files.run(executor,command),/not executable/);
+    for(const command of commands)await assert.rejects(f.app.files.run(executor,command),/not executable|control authorization has expired/);
     await assert.rejects(c.modelCommand(executor,{type:'complete',task:'t',result:'obsolete'}),/record is deleted/);
     assert.deepEqual(c.view('p'),old);assert.equal(c.view('p-2').status,'running');
     assert.equal(await fs.readFile(path.join(f.work,'sample.svg'),'utf8'),'keep user file');await absent(path.join(f.work,'new.svg'));

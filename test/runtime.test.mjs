@@ -93,6 +93,7 @@ function harness(store,disk=new Map(),runtimeOptions={}) {
   const live=new Map();let sends=0,creates=0,resumes=0;
   const controller=new Controller(store,{captureArtifact:async()=> 'snapshot:trusted-test'});
   const ctx={agents:{
+    get:id=>live.get(id),
     async create(options){creates++;return make(options.sessionId,options,false);},
     async resume(options){resumes++;return make(options.resumeSessionId,options,true);},
   },sessions:{async flush(session){disk.set(session.id,structuredClone(session.events));return true;}},

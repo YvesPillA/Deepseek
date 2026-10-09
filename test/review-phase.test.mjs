@@ -28,7 +28,7 @@ test('stage review exposes the current milestone and future dependencies without
   const p={status:'running',configVersion:1,objective:'Function, tests and docs',reviewers:[{id:'r',criteria:'Tests and docs'}],
     milestones:{m1:{id:'m1',criteria:'Function implemented and verified',deps:[]},m2:{id:'m2',criteria:'Test file and README',deps:['m1']}},
     rounds:{stage:{kind:'acceptance',milestone:'m1',status:'open',generation:1,attempts:{},votes:{other:{findings:'private peer vote'}},payload:{artifact:'snapshot'}}}};
-  const controller={identity:()=>({...binding,id:agent.id}),view:()=>structuredClone(p)};
+  const controller={identity:()=>({...binding,controlVersion:0,id:agent.id}),view:()=>structuredClone(p)};
   const tools=new Map();let prompt;
   await createRoleComposer(controller,{artifacts:{},verification:{}})({agent,get:name=>name==='tools'?{restrict(){},presentAs(){},guard(){},register:t=>tools.set(t.name,t)}:{section:s=>prompt=s.text}},binding);
   const read=JSON.parse((await tools.get('foreman_read').execute({}, {agent})).text);

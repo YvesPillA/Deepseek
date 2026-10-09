@@ -4,6 +4,14 @@ const check=(ok,message)=>{if(!ok)throw new Error(message);};
 
 /** Private host journal namespace. Models never receive this mutation capability. */
 export function runtimeTransition(previous,command) {
+  if(command.type==='project-control-drained') {
+    const p=previous.projects[command.project];
+    check(p && (p.paused===true || p.status==='cancelled') && p.controlVersion===command.controlVersion,'Project control changed while draining');
+    if(p.controlDrainVersion===command.controlVersion && (!p.paused || p.pauseStatus==='drained'))return previous;
+    const state=structuredClone(previous),next=state.projects[command.project];
+    next.controlDrainVersion=command.controlVersion;if(next.paused)next.pauseStatus='drained';
+    state.revision++;return state;
+  }
   if(command.type==='replace-empty-session')return replaceEmptySession(previous,command);
   if(command.type==='dependency-build-record') {
     const r=command.record,p=previous.projects[r?.project],old=previous.dependencyBuilds?.[r?.id];
@@ -37,7 +45,7 @@ export function runtimeTransition(previous,command) {
   }
   if(command.type==='dependency-needed') {
     const p=previous.projects[command.project],old=previous.dependencyNeeds?.[command.project];
-    check(p && !['cancelled','delivered'].includes(p.status),'Dependency project is closed or absent');
+    check(p && !p.paused && !['cancelled','delivered'].includes(p.status),'Dependency project is closed or absent');
     check(command.configVersion===p.configVersion && /^[a-f0-9]{64}$/.test(command.fingerprint??''),'Invalid dependency request');
     const approval=previous.dependencyImages?.[command.project];
     if(approval?.fingerprint===command.fingerprint && approval.configVersion===command.configVersion)return previous;
@@ -57,7 +65,7 @@ export function runtimeTransition(previous,command) {
     // Host-only commit after human confirmation. The reference is audit evidence,
     // not an authentication token; dispatchRuntime must never reach model tools.
     const p=previous.projects[command.project],old=previous.dependencyImages?.[command.project];
-    check(p && !['cancelled','delivered'].includes(p.status),'Dependency project is closed or absent');
+    check(p && !p.paused && !['cancelled','delivered'].includes(p.status),'Dependency project is closed or absent');
     check(command.configVersion===p.configVersion,'Dependency configuration expired');
     check(command.expectedRevision===(old?.revision??0),'Dependency approval changed; request fresh confirmation');
     check(/^sha256:[a-f0-9]{64}$/.test(command.image??'') && /^[a-f0-9]{64}$/.test(command.fingerprint??''),'Pinned dependency image and fingerprint required');
@@ -175,7 +183,7 @@ export function runtimeTransition(previous,command) {
   check(typeof key==='string' && key.length>0 && key.length<=300,'Invalid actor key');
   check(typeof sessionId==='string' && /^[a-zA-Z0-9-]{1,100}$/.test(sessionId),'Invalid session id');
   const p=previous.projects[binding?.project];
-  check(p && !['cancelled','delivered'].includes(p.status),'Project is closed or absent');
+  check(p && !p.paused && !['cancelled','delivered'].includes(p.status),'Project is closed, paused or absent');
   check(['coordinator','executor','reviewer'].includes(binding.role),'Invalid runtime role');
   check(binding.configVersion===p.configVersion,'Stale runtime configuration');
   if(binding.role==='reviewer')check(p.reviewers.some(r=>r.id===binding.reviewer),'Unknown supervisor');

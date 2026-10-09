@@ -3,10 +3,10 @@ window.__ModuleLoader__.load({
   factory:require=>{
     const React=require('react'),h=React.createElement;
     const labels={running:'执行中',approved:'验收通过，等待交付',delivered:'已交付',cancelled:'已取消',
-      work:'可执行',unplanned:'等待规划',planning:'规划审查',review:'验收中',passed:'已通过',paused:'暂停，待裁决',
+      work:'等待实现',unplanned:'等待规划',planning:'规划审查',review:'验收中',passed:'已通过',paused:'已暂停',pausing:'正在暂停',idle:'等待调度',
       pending:'待分配',completed:'已完成',failed:'执行失败',open:'审查中',faulted:'技术暂停',stale:'已失效',closed:'已结束',
       plan:'规划',change:'变更',acceptance:'里程碑验收',patrol:'巡查',final:'最终验收','final-review':'最终验收中',rejected:'未通过',
-      decision:'需要裁决',fault:'技术问题',delivery:'等待交付'};
+      decision:'需要裁决',fault:'技术问题',delivery:'等待交付',success:'执行成功',unknown:'结果待确认',cancelling:'已请求取消，正在停止执行活动'};
     const label=value=>labels[value]??value;
     // Main slot outlets use display:contents; each page owns its insets and scroll
     // surface. Match the native PluginManagerPage geometry and theme text roles.
@@ -43,15 +43,54 @@ window.__ModuleLoader__.load({
 .fmn-panel time{font-variant-numeric:tabular-nums}
 .fmn-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}
 .fmn-actions button[aria-pressed=true]{background:var(--dsw-alias-interactive-bg-hover);font-weight:500}
+.fmn-progress{margin-top:0}.fmn-progress dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px 16px;margin:12px 0 0;font:var(--dsw-font-xs-13)}
+.fmn-progress dt{color:var(--dsw-alias-label-secondary)}.fmn-progress dd{margin:0;min-width:0}
+.fmn-timeline{border-top:.5px solid var(--dsw-alias-border-l4);margin-top:14px;padding-top:12px}.fmn-timeline ol{margin-bottom:0}.fmn-timeline time{color:var(--dsw-alias-label-secondary);margin-right:8px}
 .fmn-alerts{position:absolute;right:16px;bottom:16px;width:min(360px,calc(100% - 32px));max-height:45vh;overflow-y:auto;padding:16px;border:0;border-radius:var(--dsw-radius-lg);box-shadow:var(--dsw-elevation-panel);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:var(--dsw-font-s-14);overflow-wrap:anywhere}
 .fmn-alerts ul{padding-left:20px}.fmn-alerts li{margin:8px 0}.fmn-alerts small{display:block;margin-top:6px;font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-secondary)}
 @media(max-width:520px){.fmn-card{padding:13px}.fmn-grid{grid-template-columns:1fr}}
 `;
     const tag=(text,key)=>h('span',{className:'fmn-tag',key},text);
     const empty=text=>h('p',{className:'fmn-muted'},text);
+    const time=value=>{
+      if(!value)return null;const date=new Date(value);if(!Number.isFinite(date.getTime()))return null;
+      return h('time',{dateTime:date.toISOString()},date.toLocaleString('zh-CN',{hour12:false}));
+    };
+    function projectProgress(p) {
+      const tasks=p.milestones.flatMap(m=>m.tasks),provided=p.progress??{};
+      const phase=p.paused?(p.pauseStatus==='drained'?'paused':'pausing'):p.status==='running'?(p.milestones.some(m=>m.status==='planning')?'planning':p.milestones.some(m=>m.status==='review')?'review':tasks.some(t=>t.status==='running')?'work':'idle'):p.status;
+      return {...provided,phase:provided.phase??phase,
+        completedTasks:provided.completedTasks??tasks.filter(t=>t.status==='completed').length,totalTasks:provided.totalTasks??tasks.length};
+    }
+    const milestoneStatus=m=>m.status==='work'?(m.blockedBy.length?'等待依赖':m.tasks.some(t=>t.status==='running')?'实现中':'等待实现'):label(m.status);
+    const phaseLabel=phase=>({work:'实现中',planning:'规划审查中',idle:'等待调度',pausing:'正在暂停，等待执行活动停止',decision:'相关里程碑等待裁决，其他任务可继续'}[phase]??label(phase));
+    const controlActions=p=>p.archived||['cancelled','delivered'].includes(p.status)?[]:p.paused===true?(p.pauseStatus==='drained'?['resume','cancel']:['cancel']):['running','final-review','approved'].includes(p.status)?['pause','cancel']:[];
+    const controlCopy={pause:{label:'暂停项目',confirm:'确认暂停项目',description:'暂停这个项目的后续调度，并请求停止当前执行活动。文件、任务和审查记录保留，可继续执行。'},
+      resume:{label:'继续项目',confirm:'确认继续项目',description:'继续这个项目的调度，沿用当前任务、里程碑和监督规则。'},
+      cancel:{label:'取消项目',confirm:'确认取消项目',description:'结束这个项目，并请求停止当前执行活动。取消后不能继续执行；工作区文件和审查记录保留。'}};
+    function Progress({project:p,onRequestAction,pendingAction,onConfirmAction,onCancelAction,actionBusy}) {
+      const progress=projectProgress(p),active=progress.activeAgents??[],action=controlCopy[pendingAction?.endpoint];
+      const confirming=pendingAction?.project===p.id&&action&&controlActions(p).includes(pendingAction.endpoint);
+      const latest=progress.latestAction,verification=progress.latestVerification;
+      return h('section',{className:'fmn-card fmn-progress','aria-label':'项目执行进度'},
+        h('h3',null,'项目执行进度'),tag(phaseLabel(progress.phase)),tag(`已完成任务 ${progress.completedTasks} / ${progress.totalTasks}`),
+        h('p',{className:'fmn-muted'},'项目 ID：',p.id),
+        h('dl',null,
+          h('dt',null,'正在执行'),h('dd',null,active.length?active.map((a,i)=>h('span',{key:i},i?'；':'',a.name??label(a.role),a.taskTitle?'：'+a.taskTitle:'',a.status?'（'+label(a.status)+'）':'')):'当前没有可确认的活动信息'),
+          h('dt',null,'最近活动'),h('dd',null,time(progress.lastActivityAt)??'尚无活动记录'),
+          h('dt',null,'最近动作'),h('dd',null,latest?h(React.Fragment,null,latest.actor?latest.actor+'：':'',latest.action,latest.status?' · '+label(latest.status):'',latest.result?h('p',{className:'fmn-muted'},latest.result):null):'尚无动作记录'),
+          h('dt',null,'最近验证'),h('dd',null,verification?h(React.Fragment,null,verification.title??'验证',verification.status?' · '+label(verification.status):'',Number.isInteger(verification.exitCode)?` · 退出码 ${verification.exitCode}`:'',verification.summary?h('p',{className:'fmn-muted'},verification.summary):null):'尚无验证记录')),
+        onRequestAction&&controlActions(p).length?h('div',{className:'fmn-actions'},controlActions(p).map(endpoint=>h('button',{key:endpoint,type:'button',disabled:actionBusy,onClick:()=>onRequestAction({endpoint,project:p.id,controlVersion:p.controlVersion??0})},controlCopy[endpoint].label))):null,
+        confirming?h('div',{className:'fmn-note','aria-label':action.confirm},h('p',null,action.description),h('div',{className:'fmn-actions'},
+          h('button',{type:'button',disabled:actionBusy,onClick:onConfirmAction},actionBusy?'处理中…':action.confirm),
+          h('button',{type:'button',disabled:actionBusy,onClick:onCancelAction},'返回'))):null,
+        progress.timeline?.length?h('div',{className:'fmn-timeline'},h('h4',null,'最近进展'),h('ol',null,progress.timeline.slice(0,5).map((event,i)=>h('li',{key:event.id??i},
+          time(event.at),event.actor?event.actor+'：':'',event.title,event.status?' · '+label(event.status):'',event.summary?h('p',{className:'fmn-muted'},event.summary):null)))):null);
+    }
     function Project({project:p,onRequestAction,pendingAction,onConfirmAction,onCancelAction,actionBusy}) {
       const terminal=['cancelled','delivered'].includes(p.status),confirm=pendingAction?.project===p.id,deleting=confirm&&pendingAction.endpoint==='delete-project';
       return h(React.Fragment,null,
+        h(Progress,{project:p,onRequestAction,pendingAction,onConfirmAction,onCancelAction,actionBusy}),
         h('section',{className:'fmn-card','aria-label':'项目设置'},
           h('h3',null,p.objective),tag(label(p.status)),tag(`规则版本 ${p.configVersion}`),
           h('p',{className:'fmn-muted'},p.workspace),
@@ -76,7 +115,7 @@ window.__ModuleLoader__.load({
             h('details',null,h('summary',null,'候选编号'),h('code',null,b.candidate)))))):null,
         h('section',{'aria-label':'里程碑'},h('h3',null,'里程碑'),
           !p.milestones.length?empty('执行负责人尚未提交里程碑。'):h('div',{className:'fmn-grid'},p.milestones.map(m=>h('article',{className:'fmn-card',key:m.id},
-            h('h4',null,m.title),tag(m.status==='work' && m.blockedBy.length?'等待依赖':label(m.status)),tag(`否决 ${m.denials} / ${m.limit}`),
+            h('h4',null,m.title),tag(milestoneStatus(m)),tag(`否决 ${m.denials} / ${m.limit}`),
             m.blockedBy.length?h('p',{className:'fmn-alert'},'等待依赖：'+m.blockedBy.map(id=>p.milestones.find(x=>x.id===id)?.title??id).join('、')):null,
             h('p',{className:'fmn-muted'},m.criteria),
             m.tasks.length?h('ul',null,m.tasks.map(t=>h('li',{key:t.id},t.title,' · ',label(t.status),t.attempt>1?`（第 ${t.attempt} 次尝试）`:''))):empty('尚无实现任务。'))))),
@@ -85,7 +124,8 @@ window.__ModuleLoader__.load({
           h('p',{className:'fmn-muted'},'各自审查，全部通过才放行。执行模块不能修改这些职责和标准。')),
         h('section',{className:'fmn-card','aria-label':'审查记录'},h('h3',null,'审查记录'),
           !p.rounds.length?empty('还没有审查记录。'):p.rounds.slice().reverse().map(r=>h('details',{key:r.id},
-            h('summary',null,label(r.kind),' · ',r.milestone?(p.milestones.find(m=>m.id===r.milestone)?.title??r.milestone):'整个项目',' · ',label(r.status),r.outcome?' / '+label(r.outcome):''),
+            h('summary',null,label(r.kind),' · ',r.milestone?(p.milestones.find(m=>m.id===r.milestone)?.title??r.milestone):'整个项目',' · ',r.kind==='plan'&&r.status==='closed'&&r.outcome==='passed'?'规划已通过，可开始实现':label(r.status)+(r.outcome?' / '+label(r.outcome):'')),
+            r.kind==='plan'?h('p',{className:'fmn-muted'},'这里审查的是实现计划；规划通过不代表成品验收通过。成品需在实现完成后另行验收。'):null,
             r.kind==='patrol'?h('p',{className:'fmn-muted'},'巡查记录意见，执行继续；阶段验收时统一处理。'):null,
             h('ul',null,r.reviewers.map(v=>h('li',{key:v.id},h('strong',null,v.name),'：',v.vote?(v.vote.pass?'通过':'提出问题'):'尚无结论',
               v.vote?h('p',{className:'fmn-findings'},v.vote.findings):null,
@@ -121,7 +161,7 @@ window.__ModuleLoader__.load({
           if((result.revision??0)>=latest.current){latest.current=result.revision??0;setData(result);setUpdated(new Date());}
           setPendingAction(null);
           if(pendingAction.endpoint==='unarchive'){setShowArchived(false);setSelected(pendingAction.project);}
-        } catch(e){if(!abort.signal.aborted)setActionError(e.message||'项目列表操作失败');}
+        } catch(e){if(!abort.signal.aborted)setActionError(e.message||'项目操作失败');}
         finally {if(!abort.signal.aborted)setActionBusy(false);if(actionAbort.current===abort)actionAbort.current=null;}
       };
       React.useEffect(()=>{
@@ -139,7 +179,7 @@ window.__ModuleLoader__.load({
           h('button',{type:'button',disabled:busy,onClick:()=>setRefresh(n=>n+1)},busy?'读取中…':'刷新')),
         h('div',{className:'fmn-content'},
           error?h('p',{role:'alert',className:'fmn-alert'},'无法更新进度：',error,data?'。以下为上次成功读取的状态。':''):null,
-          actionError?h('p',{role:'alert',className:'fmn-alert'},'无法更新项目列表：',actionError):null,
+          actionError?h('p',{role:'alert',className:'fmn-alert'},'项目操作未完成：',actionError):null,
           !data&&!error?empty('正在读取项目状态…'):null,
           data?h(ForemanView,{data,selected,onSelect:id=>{setSelected(id);setPendingAction(null);setActionError('');},showArchived,
             onShowArchived:value=>{setShowArchived(value);setPendingAction(null);setActionError('');},
@@ -198,9 +238,10 @@ window.__ModuleLoader__.load({
         if(!result.ok)throw new Error(result.error.message);
         return result.value;
       };
-      const manage=async({endpoint,project,archiveVersion},signal)=>{
-        if(!['archive','unarchive','delete-project'].includes(endpoint))throw new Error('Unsupported project list action');
-        const result=await ctx.connection.rpc.call('/foreman-next',endpoint,{project,archiveVersion},signal);
+      const manage=async({endpoint,project,archiveVersion,controlVersion},signal)=>{
+        if(!['archive','unarchive','delete-project','pause','resume','cancel'].includes(endpoint))throw new Error('Unsupported project action');
+        const payload=['pause','resume','cancel'].includes(endpoint)?{project,controlVersion}:{project,archiveVersion};
+        const result=await ctx.connection.rpc.call('/foreman-next',endpoint,payload,signal);
         if(!result.ok)throw new Error(result.error.message);return result.value;
       };
       ctx.slots.inject('main',()=>ctx.slots.register({name:'main',key:'foreman-next',inject:()=>({load,manage})},ForemanPanel));

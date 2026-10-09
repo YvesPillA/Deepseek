@@ -13,7 +13,7 @@ const fixture=()=>({id:'p',status:'running',configVersion:1,objective:'One compl
   notifications:['Permission changed'],failures:['fault']});
 async function setup(p=fixture()) {
   const agent={id:'c',session:{surface:{replaceGeneration:0}}},binding={role:'coordinator',project:'p',configVersion:1},tools=new Map();let prompt,guard,eventListener;
-  const controller={identity:subject=>{assert.equal(subject,agent);return {...binding,id:agent.id};},view:()=>structuredClone(p)};
+  const controller={identity:subject=>{assert.equal(subject,agent);return {...binding,controlVersion:0,id:agent.id};},view:()=>structuredClone(p)};
   const ctx={agent,on:(name,fn)=>{assert.equal(name,'session/event');eventListener=fn;},get:name=>name==='tools'?{restrict(){},presentAs(){},guard:f=>guard=f,register:t=>tools.set(t.name,t)}:{section:s=>prompt=s.text}};
   await createRoleComposer(controller)(ctx,binding);
   return {agent,binding,tools,prompt,guard,p,event:(session,event)=>eventListener(session,event)};
@@ -56,7 +56,7 @@ test('historical read is strictly bound to the live coordinator and current proj
 
 test('reviewer tools do not gain coordinator historical access or peer votes',async()=>{
   const p=fixture(),agent={id:'other'},binding={role:'reviewer',project:'p',reviewer:'other',round:'open',generation:1,attempt:1,configVersion:1},tools=new Map();let guard;
-  const controller={identity:()=>({...binding,id:agent.id}),view:()=>structuredClone(p)};
+  const controller={identity:()=>({...binding,controlVersion:0,id:agent.id}),view:()=>structuredClone(p)};
   await createRoleComposer(controller)({agent,get:name=>name==='tools'?{restrict(){},presentAs(){},guard:f=>guard=f,register:t=>tools.set(t.name,t)}:{section(){}}},binding);
   assert(!tools.has('foreman_detail'));assert.match(guard({name:'foreman_detail',agent}),/outside the locked foreman role/);
   const view=JSON.parse((await tools.get('foreman_read').execute({}, {agent})).text);

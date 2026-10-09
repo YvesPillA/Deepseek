@@ -14,7 +14,7 @@ test('official DSH session events and committed surface replacements invalidate 
   const agent={id:'coordinator',session:ctx.get('sessions').create('coordinator')},tools=new Map();
   const binding={role:'coordinator',project:'p',configVersion:1};
   const p={id:'p',status:'running',configVersion:1,objective:'locked '.repeat(100),reviewers:[{id:'r',criteria:'locked'}],tasks:{},milestones:{},rounds:{}};
-  const controller={identity:who=>{assert.equal(who,agent);return binding;},view:()=>structuredClone(p)};
+  const controller={identity:who=>{assert.equal(who,agent);return {...binding,controlVersion:0};},view:()=>structuredClone(p)};
   const composeCtx={on:ctx.on.bind(ctx),get:name=>name==='tools'?{restrict(){},presentAs(){},guard(){},register:tool=>tools.set(tool.name,tool)}:{section(){}}};
   try {
     await createRoleComposer(controller)(composeCtx,binding,agent);

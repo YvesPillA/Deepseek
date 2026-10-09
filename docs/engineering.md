@@ -51,11 +51,14 @@ Windows 日志锁依赖 `koffi`，`writer.guard` 使用 Win32 `LockFileEx` 内�
 
 ## 开发入口
 
-- `src/host.mjs`：宿主装配、只读服务和面板 RPC；只有实际认证的 operator 可使用专门的归档、恢复和删除记录接口，不能通过它发起任意管理命令。`src/outer-entry.mjs`：外层模式及真实会话身份。
+- `src/host.mjs`：宿主装配、只读服务和面板 RPC；只有实际认证的 operator 可使用归档、恢复显示、删除记录、暂停、继续及取消接口，不能通过它发起任意管理命令。`src/outer-entry.mjs`：外层模式及真实会话身份。
+- `src/project-progress.mjs`：有界的宿主活动投影，通过官方会话事件和一次异步观察读取动作结果，不保留提示词、推理、源码或命令输出。活动可独立于项目状态 revision 更新；没有历史观察服务时，旧活动显示未知。
 - `src/session-presentation.mjs`：内部会话命名和结束后的归档。`src/state-delta.mjs`：有界、临时的状态增量缓存。
 - `src/managed-runtime.mjs`、`src/runtime-loop.mjs`：自动调度、停止排空和恢复。
 - `presets/foreman-next/`、`client/index.js`：模式定义及侧栏面板。
 - `test/`：离线规则、文件权限、日志、回滚及本机 DSH 合约。
+
+项目暂停先持久化新的控制版本、撤销旧代理权限，再在控制器串行队列之外等待停止。只有官方代理注册表确认排空后才允许继续；停止失败不等于停止成功。继续会轮换未完成任务和未结束审查的身份，保留文件、已完成任务、已有有效票及否决次数。聊天操作仍须用户原生确认，面板使用精确 operator 身份及版本校验；模型不能调用宿主控制能力。
 
 ```powershell
 node --test test/*.test.mjs

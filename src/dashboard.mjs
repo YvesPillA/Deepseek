@@ -1,9 +1,11 @@
 /** Detached, read-only UI projection. Never publish journal commands, sessions or
  * agent capabilities. Findings are rendered as text by the client. */
-export function dashboardSnapshot(state,readiness) {
+export function dashboardSnapshot(state,readiness,progress={}) {
   const projects=Object.values(state.projects).filter(p=>p.deleted!==true).map(p=>({
     id:p.id,objective:p.objective,workspace:p.workspace,status:p.status,configVersion:p.configVersion,
     archived:p.archived===true,archiveVersion:p.archiveVersion??0,archivedAt:p.archivedAt??null,
+    paused:p.paused===true,pauseStatus:p.pauseStatus??null,controlVersion:p.controlVersion??0,
+    progress:progress[p.id]??null,
     settings:{denialLimit:p.denialLimit,patrolEvery:p.patrolEvery,faultRetries:p.faultRetries},
     completions:p.completions,nextPatrol:p.nextPatrol,reviewers:p.reviewers,
     dependencyBuilds:Object.values(state.dependencyBuilds??{}).filter(b=>b.project===p.id).map(b=>({candidate:b.id,status:b.status,fingerprint:b.fingerprint,configVersion:b.configVersion})),
@@ -36,14 +38,15 @@ export function dashboardHandler(snapshot,alerts,actions={}) {
   };
   return async(endpoint,payload,signal,peer)=>{
     if(signal?.aborted)return {ok:false,error:{code:'cancelled',message:'Request cancelled',details:{}}};
-    if(['archive','unarchive','delete-project'].includes(endpoint) && typeof actions[endpoint]==='function') {
-      if(!authorized(peer))return {ok:false,error:{code:'forbidden',message:'Only the authenticated live operator can manage archived project cards',details:{}}};
+    if(['archive','unarchive','delete-project','pause','resume','cancel'].includes(endpoint) && typeof actions[endpoint]==='function') {
+      if(!authorized(peer))return {ok:false,error:{code:'forbidden',message:'Only the authenticated live operator can manage projects',details:{}}};
+      const version=['pause','resume','cancel'].includes(endpoint)?'controlVersion':'archiveVersion';
       if(!payload || Array.isArray(payload) || typeof payload!=='object' || Object.keys(payload).length!==2 ||
-        Object.keys(payload).some(key=>!['project','archiveVersion'].includes(key)) || typeof payload.project!=='string' || !payload.project || payload.project.length>1000 ||
-        !Number.isSafeInteger(payload.archiveVersion) || payload.archiveVersion<0)
-        return {ok:false,error:{code:'bad-request',message:'Only a project ID and its displayed archive version are supported',details:{issues:[]}}};
+        Object.keys(payload).some(key=>!['project',version].includes(key)) || typeof payload.project!=='string' || !payload.project || payload.project.length>1000 ||
+        !Number.isSafeInteger(payload[version]) || payload[version]<0)
+        return {ok:false,error:{code:'bad-request',message:'Only a project ID and its displayed management version are supported',details:{issues:[]}}};
       try {
-        await actions[endpoint]({project:payload.project,archiveVersion:payload.archiveVersion},signal,peer);
+        await actions[endpoint]({project:payload.project,[version]:payload[version]},signal,peer);
         if(signal?.aborted)return {ok:false,error:{code:'cancelled',message:'Request cancelled',details:{}}};
         if(!authorized(peer))return {ok:false,error:{code:'forbidden',message:'Operator scope is no longer live',details:{}}};
         return {ok:true,value:snapshot()};

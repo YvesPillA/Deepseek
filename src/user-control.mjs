@@ -17,14 +17,14 @@ const fields={
   configure:['project','objective','reviewers'],extend:['project','milestone','additional'],
   'resume-review':['project','round'],'cancel-milestone':['project','milestone'],
   'resume-coordinator':['project','notification','reason'],
-  cancel:['project'],deliver:['project'],archive:['project'],unarchive:['project'],'delete-project':['project'],
+  pause:['project'],resume:['project'],cancel:['project'],deliver:['project'],archive:['project'],unarchive:['project'],'delete-project':['project'],
   'use-dependency-image':['project','candidate'],
   'build-dependencies':['project'],
   'recover-empty-session':['project','notification'],
 };
 const labels={create:'锁定开局设置',configure:'修改已锁定规则',extend:'追加返工机会','resume-review':'恢复技术暂停的审查',
   'resume-coordinator':'恢复停滞的执行负责人','build-dependencies':'允许联网构建依赖','recover-empty-session':'接管异常空会话',
-  'cancel-milestone':'取消里程碑',cancel:'终止项目',deliver:'确认最终交付',archive:'归档项目',unarchive:'恢复项目显示','delete-project':'删除归档项目记录','use-dependency-image':'确认项目依赖'};
+  'cancel-milestone':'取消里程碑',pause:'暂停项目',resume:'继续项目',cancel:'终止项目',deliver:'确认最终交付',archive:'归档项目',unarchive:'恢复项目显示','delete-project':'删除归档项目记录','use-dependency-image':'确认项目依赖'};
 
 export function describeUserCommand(command,project,{createWorkspace=false}={}) {
   const lines=[labels[command.type]];
@@ -44,6 +44,8 @@ export function describeUserCommand(command,project,{createWorkspace=false}={}) 
   if(command.type==='configure')lines.push('旧审批将失效，按新规则重新审查；已有否决次数保留。');
   if(command.type==='create')lines.push('确认后锁定监督名单。执行模块不能修改监督职责或自行批准交付。');
   if(command.type==='cancel')lines.push('任务将停止，已有文件保留。');
+  if(command.type==='pause')lines.push(`项目ID：${project.id}`,'停止派发并排空项目的执行者和监督者；保留现有文件、任务、已提交监督票、否决和故障次数。排空完成后可继续，不计为审查否决或技术故障。');
+  if(command.type==='resume')lines.push(`项目ID：${project.id}`,'从保留文件继续未完成任务和审查；已有监督票及否决次数保持。已完成任务和已结束审查不会重新执行。');
   if(['archive','unarchive'].includes(command.type))lines.push(`项目ID：${project.id}`,`当前状态：${project.status}`,
     command.type==='archive'?'将已结束项目从默认列表隐藏；项目文件、会话、审计记录和监督规则全部保留，可恢复显示。':'将归档项目恢复到默认列表；保留原来的结束状态，不重新启动任务或更改监督规则。');
   if(command.type==='delete-project')lines.push(`项目ID：${project.id}`,`当前状态：${project.status}`,
