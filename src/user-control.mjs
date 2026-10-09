@@ -26,11 +26,12 @@ const labels={create:'锁定开局设置',configure:'修改已锁定规则',exte
   'resume-coordinator':'恢复停滞的执行负责人','build-dependencies':'允许联网构建依赖','recover-empty-session':'接管异常空会话',
   'cancel-milestone':'取消里程碑',cancel:'终止项目',deliver:'确认最终交付',archive:'归档项目',unarchive:'恢复项目显示','delete-project':'删除归档项目记录','use-dependency-image':'确认项目依赖'};
 
-export function describeUserCommand(command,project) {
+export function describeUserCommand(command,project,{createWorkspace=false}={}) {
   const lines=[labels[command.type]];
   if(project)lines.push(`项目：${project.objective}`,`目录：${project.workspace}`);
   if(command.type==='create') {
-    lines.push(`目标：${command.objective}`,`目录：${command.workspace}`,
+    lines.push(`项目ID：${command.id}`,`目标：${command.objective}`,`目录：${command.workspace}`,
+      createWorkspace?'确认后由宿主创建这个空项目子目录；返回调整不会创建目录。':'使用现有目录，保留其中已有文件；执行者会先检查现有内容。',
       `每完成 ${command.patrolEvery??3} 个任务巡查一次；单个里程碑累计第 ${command.denialLimit??3} 轮否决暂停。`,
       `监督者初次失败后最多重试 ${command.faultRetries??3} 次。`);
   }
@@ -103,7 +104,7 @@ export class UserControl {
       let answer;
       try {
         answer=await askUntilAborted(()=>this.#ctx.userQuestions.ask({agent,signal,questions:[{id,header:labels[command.type],
-          question:'请检查以下设置或变更，确认后才会生效。',detail:dependency?ticket.detail:describeUserCommand(ticket.command,project),
+          question:'请检查以下设置或变更，确认后才会生效。',detail:dependency?ticket.detail:describeUserCommand(ticket.command,project,{createWorkspace:ticket.workspaceWillBeCreated}),
           options:[{label:approve},{label:'返回调整'}],multiSelect:false,intent:{kind:'plan-review',approve}}]}),signal);
       } catch(error) {
         signal.throwIfAborted();this.#authorize(agent);
@@ -120,7 +121,7 @@ export class UserControl {
         if(command.type==='create')check(this.#canStart(),'Startup eligibility changed while awaiting confirmation');
       }};
       const result=dependency?await service.confirm(ticket,id,options):await this.#controller.confirmUserCommand(ticket,id,options);
-      return {applied:true,project:command.project??command.id,...(command.type==='build-dependencies'?{build:result}:{})};
+      return {applied:true,project:dependency?command.project:ticket.command.project??ticket.command.id,...(command.type==='build-dependencies'?{build:result}:{})};
     } finally {this.#pending.delete(agent);}
   }
 }

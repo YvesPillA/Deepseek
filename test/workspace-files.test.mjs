@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import {initialState,transition} from '../src/core.mjs';
@@ -110,4 +111,146 @@ test('task-count patrol captures evidence without blocking subsequent independen
     await f.files.run(f.b,{action:'write',path:'later.txt',text:'Independent work continues',expectedHash:null});
     assert.equal(f.c.view('p').completions,3);
   } finally {await f.close();}
+});
+
+async function preparationFixture() {
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'foreman-workspace-plan-'));
+  const parent=path.join(root,'projects'),protectedRoot=path.join(root,'host');
+  await fs.mkdir(parent);await fs.mkdir(protectedRoot);
+  const files=new WorkspaceFiles({}, {protectedRoots:[protectedRoot]});
+  return {root,parent,protectedRoot,files,close:()=>fs.rm(root,{recursive:true,force:true})};
+}
+
+test('workspace preparation never writes and only confirmed native authority can create one leaf',async()=>{
+  const f=await preparationFixture();try {
+    const work=path.join(f.parent,'sample-project');
+    const plan=await f.files.prepareWorkspace(work);
+    assert.deepEqual(plan,{workspace:await fs.realpath(f.parent).then(p=>path.join(p,'sample-project')),create:true});
+    assert(Object.isFrozen(plan));
+    await assert.rejects(fs.stat(work),{code:'ENOENT'});
+    await assert.rejects(f.files.confirmWorkspace({...plan},{},{authorize:()=>{}}),/Invalid/);
+    await assert.rejects(f.files.confirmWorkspace(plan),/authorization required/);
+    await assert.rejects(f.files.confirmWorkspace(plan,{},{authorize:()=>{throw new Error('Native user cancelled');}}),/cancelled/);
+    await assert.rejects(fs.stat(work),{code:'ENOENT'});
+    await assert.rejects(f.files.confirmWorkspace(plan,{},{authorize:()=>{}}),/consumed/);
+    const confirmed=await f.files.prepareWorkspace(work);let authorizations=0;
+    assert.equal(await f.files.confirmWorkspace(confirmed,{},{authorize:()=>authorizations++}),confirmed.workspace);
+    assert.equal(authorizations,4);assert((await fs.stat(work)).isDirectory());
+    const existing=await f.files.prepareWorkspace(work);assert.equal(existing.create,false);
+    assert.equal(await f.files.confirmWorkspace(existing,{},{authorize:()=>{}}),confirmed.workspace);
+  } finally {await f.close();}
+});
+
+test('workspace preparation rejects absent parents, aliases, links, protected storage and volume roots',async()=>{
+  const f=await preparationFixture();try {
+    await assert.rejects(f.files.prepareWorkspace(path.join(f.parent,'missing','leaf')),{code:'ENOENT'});
+    for(const leaf of ['.git','node_modules','.dsh','.codex','.agent-presets','NUL.txt','COM1','leaf.','leaf ','leaf:stream'])
+      await assert.rejects(f.files.prepareWorkspace(path.join(f.parent,leaf)),/path/);
+    await assert.rejects(f.files.prepareWorkspace(path.parse(f.root).root),/Volume root/);
+    await assert.rejects(f.files.prepareWorkspace(path.join(f.protectedRoot,'leaf')),/protected storage/);
+    await assert.rejects(f.files.prepareWorkspace(f.root),/protected storage/);
+    await fs.symlink(f.parent,path.join(f.root,'link'),'junction');
+    await assert.rejects(f.files.prepareWorkspace(path.join(f.root,'link','leaf')),/links/);
+    await assert.rejects(f.files.prepareWorkspace(path.join(f.root,'link')),/links/);
+    const failClosed=new WorkspaceFiles({}, {protectedRoots:[path.join(f.root,'unprovisioned-host')]});
+    await assert.rejects(failClosed.prepareWorkspace(path.join(f.parent,'leaf')),{code:'ENOENT'});
+    assert.deepEqual(await fs.readdir(f.parent),[]);
+  } finally {await f.close();}
+});
+
+test('confirmation refuses replaced parents, late links and directories appearing after preparation',async()=>{
+  const f=await preparationFixture();try {
+    const work=path.join(f.parent,'leaf');
+    const beforeReplace=await f.files.prepareWorkspace(work);
+    await fs.rename(f.parent,path.join(f.root,'old-parent'));await fs.mkdir(f.parent);
+    await assert.rejects(f.files.confirmWorkspace(beforeReplace,{},{authorize:()=>{}}),/changed/);
+    assert.deepEqual(await fs.readdir(f.parent),[]);
+    const beforeLink=await f.files.prepareWorkspace(work);
+    await fs.rmdir(f.parent);await fs.symlink(path.join(f.root,'old-parent'),f.parent,'junction');
+    await assert.rejects(f.files.confirmWorkspace(beforeLink,{},{authorize:()=>{}}),/links/);
+    await fs.unlink(f.parent);await fs.mkdir(f.parent);
+    const race=await f.files.prepareWorkspace(work);
+    await assert.rejects(f.files.confirmWorkspace(race,{},{authorize:()=>{
+      fsSync.mkdirSync(work);fsSync.writeFileSync(path.join(work,'owned.txt'),'Other creator');
+    }}),/appeared/);
+    assert.equal(await fs.readFile(path.join(work,'owned.txt'),'utf8'),'Other creator');
+  } finally {await f.close();}
+});
+
+test('confirmation repeats authorization and all boundaries without deleting a created directory on failure',async()=>{
+  const f=await preparationFixture();try {
+    const work=path.join(f.parent,'leaf'),plan=await f.files.prepareWorkspace(work);
+    let attempts=0;
+    await assert.rejects(f.files.confirmWorkspace(plan,{},{authorize:()=>{
+      if(++attempts===3)throw new Error('User authority revoked');
+    }}),/revoked/);
+    assert((await fs.stat(work)).isDirectory());
+    const next=path.join(f.parent,'next'),nextPlan=await f.files.prepareWorkspace(next);
+    await assert.rejects(f.files.confirmWorkspace(nextPlan,{},{authorize:()=>{
+      fsSync.renameSync(f.protectedRoot,path.join(f.root,'old-host'));
+      fsSync.symlinkSync(f.parent,f.protectedRoot,'junction');
+    }}),/protected storage/);
+    await assert.rejects(fs.stat(next),{code:'ENOENT'});
+    await fs.unlink(f.protectedRoot);await fs.rename(path.join(f.root,'old-host'),f.protectedRoot);
+    const finalPlan=await f.files.prepareWorkspace(next);let calls=0;
+    await assert.rejects(f.files.confirmWorkspace(finalPlan,{},{authorize:()=>{
+      if(++calls===3) {
+        fsSync.renameSync(f.protectedRoot,path.join(f.root,'old-host'));
+        fsSync.symlinkSync(f.parent,f.protectedRoot,'junction');
+      }
+    }}),/protected storage/);
+    assert((await fs.stat(next)).isDirectory());
+  } finally {await f.close();}
+});
+
+test('only explicit deletion of a terminal project releases the two-way workspace reservation',async()=>{
+  const f=await preparationFixture();try {
+    const work=path.join(f.parent,'leaf');
+    for(const status of ['running','cancelled','delivered']) {
+      const peer={id:'old',workspace:f.parent,status,archived:true};
+      await assert.rejects(f.files.prepareWorkspace(work,{old:peer}),/overlaps project old/);
+      await assert.rejects(f.files.prepareWorkspace(work,{old:{...peer,deleted:status==='running'}}),/overlaps project old/);
+    }
+    for(const status of ['cancelled','delivered']) {
+      const projects={old:{id:'old',workspace:f.parent,status,deleted:true}};
+      const plan=await f.files.prepareWorkspace(work,projects);assert.equal(plan.create,true);
+    }
+    const plan=await f.files.prepareWorkspace(work),projects={new:{id:'new',workspace:path.join(work,'nested'),status:'running'}};
+    await assert.rejects(f.files.confirmWorkspace(plan,projects,{authorize:()=>{}}),/overlaps project new/);
+    await assert.rejects(fs.stat(work),{code:'ENOENT'});
+    await fs.mkdir(work);
+    for(const status of ['cancelled','delivered']) {
+      const projects={old:{id:'old',workspace:work,status,deleted:true}};
+      assert.equal(await f.files.validateWorkspace(work,projects),await fs.realpath(work));
+    }
+    await assert.rejects(f.files.validateWorkspace(work,{old:{id:'old',workspace:work,status:'running',deleted:true}}),/overlaps/);
+  } finally {await f.close();}
+});
+
+test('authority lost during asynchronous validation cannot create a workspace; EEXIST preserves the winner',async t=>{
+  const f=await preparationFixture();try {
+    const work=path.join(f.parent,'leaf'),plan=await f.files.prepareWorkspace(work);
+    let live=true;
+    const realpath=fs.realpath;
+    t.mock.method(fs,'realpath',async(...args)=>{
+      const result=await realpath(...args);
+      if(args[0]===f.parent)live=false;
+      return result;
+    });
+    await assert.rejects(f.files.confirmWorkspace(plan,{},{authorize:()=>{assert(live,'Native authority revoked during validation');}}),/revoked/);
+    t.mock.restoreAll();await assert.rejects(fs.stat(work),{code:'ENOENT'});
+    const race=await f.files.prepareWorkspace(work);let permits=0;
+    await assert.rejects(f.files.confirmWorkspace(race,{},{authorize:()=>{
+      if(++permits===2) {
+        fsSync.mkdirSync(work);fsSync.writeFileSync(path.join(work,'winner.txt'),'Winner data');
+      }
+    }}),{code:'EEXIST'});
+    assert.equal(await fs.readFile(path.join(work,'winner.txt'),'utf8'),'Winner data');
+    const other=path.join(f.parent,'other'),asyncPlan=await f.files.prepareWorkspace(other);
+    await assert.rejects(f.files.confirmWorkspace(asyncPlan,{},{authorize:()=>Promise.resolve(true)}),/synchronous/);
+    await assert.rejects(fs.stat(other),{code:'ENOENT'});
+    const denied=await f.files.prepareWorkspace(other);
+    await assert.rejects(f.files.confirmWorkspace(denied,{},{authorize:()=>false}),/no longer authorized/);
+    await assert.rejects(fs.stat(other),{code:'ENOENT'});
+  } finally {t.mock.restoreAll();await f.close();}
 });

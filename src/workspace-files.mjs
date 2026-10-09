@@ -20,36 +20,109 @@ function segments(relative,allowRoot=false) {
  * Caller must include journal, plugin code, DSH home and session storage in protectedRoots.
  */
 export class WorkspaceFiles {
-  #controller;#artifacts;#protected;#max;
+  #controller;#artifacts;#protected;#max;#plans=new WeakMap();
   constructor(controller,{artifacts,protectedRoots,maxBytes=1024*1024}) {
     check(Array.isArray(protectedRoots) && protectedRoots.length>0 && protectedRoots.every(p=>path.isAbsolute(p)),'Absolute protected roots required');
     check(Number.isSafeInteger(maxBytes) && maxBytes>0,'Invalid file limit');
     this.#controller=controller;this.#artifacts=artifacts;this.#protected=protectedRoots.map(p=>path.resolve(p));this.#max=maxBytes;
   }
-  async #root(workspace) {
-    check(path.isAbsolute(workspace),'Absolute workspace required');
-    const root=await fs.realpath(workspace);
-    check((await fs.stat(root)).isDirectory(),'Workspace must be a directory');
+  async #directory(workspace) {
+    check(typeof workspace==='string' && path.isAbsolute(workspace),'Absolute workspace required');
+    const resolved=path.resolve(workspace),volume=path.parse(resolved).root;
+    let current=volume,stat=await fs.lstat(current);
+    check(!stat.isSymbolicLink() && stat.isDirectory(),'Workspace links are not permitted');
+    for(const part of path.relative(volume,resolved).split(path.sep).filter(Boolean)) {
+      current=path.join(current,part);stat=await fs.lstat(current);
+      check(!stat.isSymbolicLink(),'Workspace links are not permitted');
+      check(stat.isDirectory(),'Workspace must be a directory');
+    }
+    return {root:await fs.realpath(resolved),stat};
+  }
+  async #boundaries(root) {
     check(root!==path.parse(root).root,'Volume root cannot be an execution workspace');
     for(const protectedPath of this.#protected) {
       // Missing protected paths fail closed: host must provision them before mounting.
       const real=await fs.realpath(protectedPath);
       check(!inside(root,real) && !inside(real,root),'Workspace overlaps protected storage');
     }
-    return root;
   }
-  async validateWorkspace(workspace,projects={},excludeId) {
-    const root=await this.#root(workspace);
+  async #root(workspace) {
+    const {root}=await this.#directory(workspace);
+    await this.#boundaries(root);return root;
+  }
+  async #overlaps(root,projects,excludeId) {
     for(const p of Object.values(projects)) {
       if(p.id===excludeId)continue;
-      // Retain reservations even after cancellation/delivery: old artifacts and
-      // still-draining agents must not silently become another project's data.
+      // Only host deletion of a terminal project releases its reservation.
+      if(p.deleted===true && ['cancelled','delivered'].includes(p.status))continue;
       let peer;
       try {peer=await fs.realpath(p.workspace);}
       catch(e){if(e.code!=='ENOENT')throw e;peer=path.resolve(p.workspace);}
       check(!inside(root,peer) && !inside(peer,root),`Workspace overlaps project ${p.id}`);
     }
+  }
+  async validateWorkspace(workspace,projects={},excludeId) {
+    const root=await this.#root(workspace);
+    await this.#overlaps(root,projects,excludeId);
     return root;
+  }
+  #sameDirectory(before,after) {
+    check(before.root===after.root && before.stat.dev===after.stat.dev && before.stat.ino===after.stat.ino &&
+      before.stat.birthtimeMs===after.stat.birthtimeMs,'Workspace parent or directory changed after preparation');
+  }
+  async #absent(workspace) {
+    try {await fs.lstat(workspace);}
+    catch(e){if(e.code==='ENOENT')return;throw e;}
+    throw new Error('Workspace appeared after preparation; prepare again');
+  }
+  /** Read-only preparation. The returned object is an instance-bound, single-use
+   * host capability; copying its display fields does not grant creation rights. */
+  async prepareWorkspace(workspace,projects={}) {
+    check(typeof workspace==='string' && path.isAbsolute(workspace),'Absolute workspace required');
+    const requested=path.resolve(workspace);
+    let existing;
+    try {await fs.lstat(requested);existing=true;}
+    catch(e){if(e.code!=='ENOENT')throw e;existing=false;}
+    let identity,root;
+    if(existing) {
+      root=await this.validateWorkspace(requested,projects);
+      identity=await this.#directory(requested);
+      check(root===identity.root,'Workspace changed during preparation');
+    } else {
+      const leaf=path.basename(requested);segments(leaf);
+      identity=await this.#directory(path.dirname(requested));
+      root=path.join(identity.root,leaf);
+      await this.#boundaries(root);await this.#overlaps(root,projects);
+      await this.#absent(requested);
+    }
+    const plan=Object.freeze({workspace:root,create:!existing});
+    this.#plans.set(plan,{requested,identity});return plan;
+  }
+  async confirmWorkspace(plan,projects={}, {authorize}={}) {
+    const prepared=plan && this.#plans.get(plan);
+    check(prepared,'Invalid or consumed workspace preparation');
+    check(typeof authorize==='function','Workspace confirmation authorization required');
+    this.#plans.delete(plan);
+    const permit=()=>{
+      const allowed=authorize();
+      check(!allowed || typeof allowed.then!=='function','Workspace authorization must be synchronous');
+      check(allowed!==false,'Workspace confirmation is no longer authorized');
+    };
+    const recheck=async(created=false)=>{
+      const identity=await this.#directory(plan.create?path.dirname(prepared.requested):prepared.requested);
+      this.#sameDirectory(prepared.identity,identity);
+      await this.#boundaries(plan.workspace);await this.#overlaps(plan.workspace,projects);
+      if(plan.create && !created)await this.#absent(prepared.requested);
+      else check(await this.validateWorkspace(prepared.requested,projects)===plan.workspace,'Workspace changed after preparation');
+    };
+    permit();await recheck();permit();
+    if(plan.create) {
+      // Never merge with an EEXIST race and never recursively remove user data
+      // when a subsequent authorization or filesystem check fails.
+      await fs.mkdir(prepared.requested);
+      await recheck(true);
+    }
+    permit();await recheck(plan.create);permit();return plan.workspace;
   }
   async #target(root,parts,{parents=false}={}) {
     let current=root;

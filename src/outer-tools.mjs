@@ -39,6 +39,7 @@ export function createOuterComposer(control,{snapshot}) {
         '监督验收标准严格来自用户目标和明确要求。无障碍、双引擎兼容、体积门槛、性能目标等可选增强，先询问用户是否需要，不自动升级为强制验收。简单或单文件任务建议精简监督人数和职责；用户已确认的名单和全员一致规则保持，不自行减员或降低标准。'+
         '先读 foreman_status，未启用时如实说明尚不能启动，不反复调用开局工具。日常状态留在面板，只将权限、重大故障、待裁决和最终交付反馈用户。返回调整时根据反馈重拟草案，不自动重复申请。'+
         '\nforeman_user_request 的 command 是 JSON 字符串。开局：{type:"create",id,objective,workspace,reviewers:[{id,name,responsibility,criteria}],denialLimit:3,patrolEvery:3,faultRetries:3}。'+
+        'workspace 可使用现有目录，或现有父目录下尚不存在的单层子目录；后者会在原生确认卡说明，并由宿主仅在确认后创建，无需让用户手工创建。未删除的项目之间目录不能重叠；已删除且结束的历史项目不再占用目录。旧ID仍保留，若草案ID属于已删除历史，宿主会在确认卡给出新的编号；后续以工具返回的project为准，不复用旧ID。'+
         'denialLimit 是同一里程碑累计被否决的轮数，默认第3轮暂停上报，不是每位监督者各3次；patrolEvery 是已完成任务数，默认每3个任务巡查，不是里程碑数。根据 foreman_status 的实际验证后端说明环境，本机验证不要求 Docker。'+
         '调整规则：{type:"configure",project,objective?,reviewers?}；追加机会：{type:"extend",project,milestone,additional}；恢复技术暂停审查：{type:"resume-review",project,round}；'+
         '恢复无进展的负责人：{type:"resume-coordinator",project,notification:故障通知ID,reason:恢复说明}；'+

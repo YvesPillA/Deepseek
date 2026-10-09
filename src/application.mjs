@@ -60,6 +60,8 @@ export async function openApplication(config,{runCli,sandbox,subprocess}={}) {
     const controller=new Controller(store,{
       captureArtifact:p=>requireFiles().capture(p),
       validateWorkspace:(workspace,projects,excludeId)=>requireFiles().validateWorkspace(workspace,projects,excludeId),
+      prepareWorkspace:(workspace,projects)=>requireFiles().prepareWorkspace(workspace,projects),
+      confirmWorkspace:(plan,projects,options)=>requireFiles().confirmWorkspace(plan,projects,options),
     });
     const artifacts=new ArtifactStore(path.join(config.storageRoot,'artifacts'));
     if(configured)files=new WorkspaceFiles(controller,{artifacts,protectedRoots:[config.storageRoot,pluginRoot,config.dshHome,config.sessionRoot,...(dockerRoot?[dockerRoot]:[]),...(dependencyBuildRoot?[dependencyBuildRoot]:[]),...(buildxDirectory?[buildxDirectory]:[])]});

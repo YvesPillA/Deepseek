@@ -92,7 +92,7 @@ test('project reservation is serialized and rejects aliases, nested workspaces a
     const attempts=await Promise.allSettled(['p','q'].map(id=>f.app.controller.userCommand(project(id,f.work))));
     assert.equal(attempts.filter(r=>r.status==='fulfilled').length,1);
     const alias=path.join(f.root,'alias');await fs.symlink(f.work,alias,'junction');
-    await assert.rejects(f.app.controller.userCommand(project('alias',alias)),/overlaps project/);
+    await assert.rejects(f.app.controller.userCommand(project('alias',alias)),/overlaps project|links are not permitted/);
     const child=path.join(f.work,'child');await fs.mkdir(child);
     await assert.rejects(f.app.controller.userCommand(project('child',child)),/overlaps project/);
     await f.app.controller.userCommand({type:'cancel',project:'p'});

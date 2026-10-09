@@ -9,6 +9,18 @@ const allowed = {
   reviewer: new Set(['vote'])
 };
 const ensure = (value, reason) => { if (!value) throw new Error(reason); };
+// A removed record keeps its identity forever. Offer a fresh identity before
+// human confirmation; never rewrite an already confirmed or active project ID.
+function freshCreateId(command,projects) {
+  if(command.type!=='create' || !Object.hasOwn(projects,command.id) || projects[command.id].deleted!==true ||
+    !['cancelled','delivered'].includes(projects[command.id].status))return;
+  const base=command.id;
+  for(let n=2;n<=Object.keys(projects).length+2;n++) {
+    const suffix='-'+n,candidate=base.slice(0,80-suffix.length)+suffix;
+    if(!Object.hasOwn(projects,candidate)){command.id=candidate;return;}
+  }
+  throw Error('No fresh project identity available');
+}
 const approvalBasis=p=>p?JSON.stringify({status:p.status,configVersion:p.configVersion,objective:p.objective,workspace:p.workspace,
   archived:p.archived===true,deleted:p.deleted===true,archiveVersion:p.archiveVersion??0,
   coordinatorWake:p.coordinatorWake,
@@ -20,10 +32,14 @@ const approvalBasis=p=>p?JSON.stringify({status:p.status,configVersion:p.configV
  */
 export class Controller {
   #store; #bindings = new WeakMap(); #live = new Map(); #capture; #serial = Promise.resolve();
-  #validateWorkspace;
+  #validateWorkspace;#prepareWorkspace;#confirmWorkspace;
   #closing;#closed=false;
   #prepared=new WeakMap();
-  constructor(store, { captureArtifact, validateWorkspace }) { this.#store = store; this.#capture = captureArtifact;this.#validateWorkspace=validateWorkspace; }
+  constructor(store, { captureArtifact, validateWorkspace, prepareWorkspace, confirmWorkspace }) {
+    ensure(!!prepareWorkspace===!!confirmWorkspace,'Workspace preparation and confirmation must be configured together');
+    this.#store = store; this.#capture = captureArtifact;this.#validateWorkspace=validateWorkspace;
+    this.#prepareWorkspace=prepareWorkspace;this.#confirmWorkspace=confirmWorkspace;
+  }
   bind(agent, binding) {
     ensure(!this.#closing && !this.#closed,'Controller is closing or closed');
     ensure(agent && typeof agent === 'object' && typeof agent.id === 'string', 'Need exact live DSH agent');
@@ -56,6 +72,7 @@ export class Controller {
     // Never bind this method to a model-facing tool or unauthenticated HTTP endpoint.
     const frozen=structuredClone(command);
     return this.#serialize(async()=>{
+      freshCreateId(frozen,this.#store.snapshot().projects);
       if(frozen.type==='create' && this.#validateWorkspace)
         frozen.workspace=await this.#validateWorkspace(frozen.workspace,this.#store.snapshot().projects);
       return this.#store.dispatch({role:'user'},frozen);
@@ -65,10 +82,15 @@ export class Controller {
     const command=structuredClone(raw);
     return this.#serialize(async()=>{
       const state=this.#store.snapshot();
-      if(command.type==='create' && this.#validateWorkspace)command.workspace=await this.#validateWorkspace(command.workspace,state.projects);
+      freshCreateId(command,state.projects);
+      let workspacePlan;
+      if(command.type==='create') {
+        if(this.#prepareWorkspace){workspacePlan=await this.#prepareWorkspace(command.workspace,state.projects);command.workspace=workspacePlan.workspace;}
+        else if(this.#validateWorkspace)command.workspace=await this.#validateWorkspace(command.workspace,state.projects);
+      }
       transition(state,{role:'user'},command); // Validate before asking, without committing.
-      const ticket=Object.freeze({command:structuredClone(command)});
-      this.#prepared.set(ticket,{command,basis:approvalBasis(state.projects[command.project??command.id])});
+      const ticket=Object.freeze({command:structuredClone(command),workspaceWillBeCreated:workspacePlan?.create===true});
+      this.#prepared.set(ticket,{command,workspacePlan,basis:approvalBasis(state.projects[command.project??command.id])});
       return ticket;
     });
   }
@@ -81,12 +103,13 @@ export class Controller {
       this.#prepared.delete(ticket);
       const command=structuredClone(prepared.command),state=this.#store.snapshot();
       ensure(approvalBasis(state.projects[command.project??command.id])===prepared.basis,'Project changed while awaiting confirmation; review the updated proposal');
-      if(command.type==='create' && this.#validateWorkspace) {
-        const canonical=await this.#validateWorkspace(command.workspace,state.projects);
+      ensure(typeof questionId==='string' && questionId.length>0,'Human confirmation reference required');
+      transition(state,{role:'user'},command); // Recheck before any directory creation.
+      if(command.type==='create' && (this.#validateWorkspace || prepared.workspacePlan)) {
+        const canonical=prepared.workspacePlan?await this.#confirmWorkspace(prepared.workspacePlan,state.projects,{authorize}):await this.#validateWorkspace(command.workspace,state.projects);
         ensure(canonical===command.workspace,'Workspace changed while awaiting confirmation; review the updated location');
       }
       authorize();
-      ensure(typeof questionId==='string' && questionId.length>0,'Human confirmation reference required');
       command.userApproval={source,questionId};
       return this.#store.dispatch({role:'user'},command);
     });
