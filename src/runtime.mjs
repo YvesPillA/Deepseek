@@ -1,0 +1,158 @@
+import {readState} from './state-reader.mjs';
+import {sessionEvents} from './stored-session.mjs';
+import {randomUUID} from 'node:crypto';
+import {DeliveryPump} from './outbox.mjs';
+import {DshTransport} from './dsh-transport.mjs';
+import {pendingAssignments,syncExecutionQueue} from './execution-scheduler.mjs';
+import {syncReviewQueue,REVIEW_PROTOCOL} from './review-scheduler.mjs';
+import {syncCoordinatorQueue,COORDINATOR_PROTOCOL} from './coordinator-scheduler.mjs';
+import {deliveryEligibility} from './delivery-policy.mjs';
+import {ReviewMonitor} from './review-monitor.mjs';
+import {ExecutionMonitor} from './execution-monitor.mjs';
+import {reviewRunOutcome} from './review-monitor.mjs';
+
+/** Explicit tick, owned by the host. No model-facing service and no background timer.
+ * Production mounting remains gated on audited composition, tool guards and user UI.
+ */
+export class ForemanRuntime {
+  #store;#controller;#driver;#model;#live=new Map();#pump;#active;#closed=false;#recovered=false;#errors=new Map();
+  #monitor;#executionMonitor;#closing;
+  constructor(store,controller,driver,ctx,{model,reviewTimeoutMs=600000,executionTimeoutMs=null,now=Date.now}) {
+    this.#store=store;this.#controller=controller;this.#driver=driver;this.#model=structuredClone(model);
+    this.#pump=new DeliveryPump(store,new DshTransport(store,driver,ctx,{
+      resolve:job=>this.#resolve(job),lookup:job=>this.#lookup(job),
+    }));
+    this.#monitor=new ReviewMonitor(store,controller,{timeoutMs:reviewTimeoutMs,now,
+      lookup:job=>this.#lookup(job)?.agent,
+      retire:async(job,agent)=>{await this.#driver.dispose(agent);this.#live.delete(this.#key(job));},
+    });
+    this.#executionMonitor=new ExecutionMonitor(store,controller,{timeoutMs:executionTimeoutMs,now,
+      lookup:job=>this.#lookup(job)?.agent,
+      retire:async(job,agent)=>{await this.#driver.dispose(agent);this.#live.delete(this.#key(job));},
+    });
+  }
+  diagnostics(){return [...this.#errors].map(([key,error])=>({key,error}));}
+  #key(job) {
+    if(job.subject.protocol===REVIEW_PROTOCOL)return job.id;
+    if(job.subject.protocol===COORDINATOR_PROTOCOL)return job.recipient;
+    const record=Object.values(readState(this.#store).runtimeAgents??{}).find(a=>a.sessionId===job.recipient);
+    if(!record)throw new Error('No reserved executor for delivery');
+    return record.key;
+  }
+  #lookup(job) {
+    const key=this.#key(job),record=readState(this.#store).runtimeAgents?.[key];
+    return record?{sessionId:record.sessionId,agent:this.#live.get(key)}:null;
+  }
+  async #ensure(key,binding) {
+    if(this.#closed)throw new Error('Runtime closed');
+    if(this.#live.has(key))return this.#live.get(key);
+    const previous=readState(this.#store).runtimeAgents?.[key];
+    let record=previous;
+    if(!record) {
+      const state=await this.#store.dispatchRuntime({type:'reserve-agent',key,sessionId:randomUUID(),binding});
+      record=state.runtimeAgents[key];
+    }
+    // Only a reservation with proof that creation never began can create.
+    // Starting/legacy records must resume: missing files alone prove nothing.
+    const fresh=record.phase==='reserved';
+    const project=this.#controller.view(record.binding.project);
+    let agent;
+    try {
+      if(fresh)await this.#store.dispatchRuntime({type:'begin-agent',key,sessionId:record.sessionId});
+      agent=await this.#driver.create(record.binding,{
+        cwd:project.workspace,model:this.#model,sessionId:record.sessionId,
+        ...(!fresh?{persistedSessionId:record.sessionId}:{}),
+      });
+      if(await this.#driver.checkpoint(agent))await this.#store.dispatchRuntime({type:'ready-agent',key,sessionId:record.sessionId});
+      this.#live.set(key,agent);this.#errors.delete(key);
+      await this.#store.dispatchRuntime({type:'incident',project:record.binding.project,key:'agent:'+key,message:null});
+      return agent;
+    } catch(e){
+      if(agent){await this.#driver.dispose(agent);this.#live.delete(key);}
+      this.#errors.set(key,e.message);
+      await this.#store.dispatchRuntime({type:'incident',project:record.binding.project,key:'agent:'+key,message:`代理会话创建或恢复失败：${e.message}`.slice(0,4000)});
+      throw e;
+    }
+  }
+  async #resolve(job) {
+    const key=this.#key(job),s=job.subject;
+    if(s.protocol===REVIEW_PROTOCOL)return this.#ensure(key,{role:'reviewer',project:job.project,reviewer:s.reviewer,
+      configVersion:s.configVersion,round:s.round,generation:s.generation,attempt:s.attempt});
+    if(s.protocol===COORDINATOR_PROTOCOL)return this.#ensure(key,{role:'coordinator',project:job.project,configVersion:s.configVersion});
+    const record=readState(this.#store).runtimeAgents[key];
+    return this.#ensure(key,record.binding);
+  }
+  tick({limit=2,assignLimit=2}={}) {
+    if(this.#closed)return Promise.reject(new Error('Runtime closed'));
+    if(!Number.isSafeInteger(assignLimit)||assignLimit<0||assignLimit>10)return Promise.reject(new Error('Invalid assignment limit'));
+    if(this.#active)return this.#active;
+    this.#active=this.#tick(limit,assignLimit).finally(()=>{this.#active=null;});return this.#active;
+  }
+  async #tick(limit,assignLimit) {
+    if(!this.#recovered){await this.#pump.recover();this.#recovered=true;}
+    // Revoke stopped/configuration-obsolete worlds before considering new work.
+    for(const [key,agent] of this.#live) {
+      if(this.#closed)return;
+      const binding=this.#controller.identity(agent),p=readState(this.#store).projects[binding.project];
+      const finished=binding.role==='executor'?['completed','failed'].includes(p?.tasks[binding.task]?.status):
+        binding.role==='reviewer' && (p?.rounds[binding.round]?.status!=='open' ||
+          p.rounds[binding.round].votes[binding.reviewer] || (p.rounds[binding.round].attempts[binding.reviewer]??0)+1!==binding.attempt);
+      if(!p || ['cancelled','delivered'].includes(p.status) || p.configVersion!==binding.configVersion || finished) {
+        await this.#driver.dispose(agent);this.#live.delete(key);
+      }
+    }
+    for(const job of Object.values(readState(this.#store).outbox??{})) {
+      if(this.#closed)return;
+      if(job.status!=='delivered' || deliveryEligibility(readState(this.#store),job)!=='ready')continue;
+      try {await this.#resolve(job);}catch(e){this.#errors.set(`resume:${job.id}`,e.message);}
+    }
+    for(const candidate of pendingAssignments(readState(this.#store)).slice(0,assignLimit)) {
+      if(this.#closed)return;
+      const {project,task,configVersion,planVersion,taskAttempt}=candidate;
+      try {
+        const coordinator=await this.#ensure(`coordinator:${project}:${configVersion}`,{role:'coordinator',project,configVersion});
+        const worker=await this.#ensure(`executor:${project}:${task}:${configVersion}:${planVersion}:${taskAttempt}`,{role:'executor',project,task,configVersion,planVersion,taskAttempt});
+        await this.#controller.assign(coordinator,worker,task);
+        this.#errors.delete(`assignment:${project}:${task}`);
+      } catch(e){this.#errors.set(`assignment:${project}:${task}`,e.message);}
+    }
+    if(this.#closed)return;
+    await this.#monitor.poll();
+    if(this.#closed)return;
+    await this.#executionMonitor.poll();
+    if(this.#closed)return;
+    await syncExecutionQueue(this.#store);await syncReviewQueue(this.#store);await syncCoordinatorQueue(this.#store);
+    if(this.#closed)return;
+    await this.#pump.drain({limit});
+    if(this.#closed)return;
+    await this.#monitor.poll();
+    await this.#executionMonitor.poll();
+    await this.#checkCoordinatorProgress();
+  }
+  async #checkCoordinatorProgress() {
+    for(const job of Object.values(readState(this.#store).outbox??{})) {
+      if(job.subject.protocol!==COORDINATOR_PROTOCOL || job.status!=='delivered')continue;
+      const key='stalled:'+job.id;
+      if(deliveryEligibility(readState(this.#store),job)!=='ready') {
+        await this.#store.dispatchRuntime({type:'incident',project:job.project,key,message:null});continue;
+      }
+      const actor=this.#lookup(job)?.agent;if(!actor)continue;
+      const p=this.#controller.view(job.project),cursor=job.subject.auditStart;
+      if(!Number.isSafeInteger(cursor))continue; // Old development jobs lack an evidence boundary.
+      const progress=p.audit.slice(cursor).some(a=>a.actor==='coordinator' && a.actorId===actor.id);
+      if(progress) {await this.#store.dispatchRuntime({type:'incident',project:job.project,key,message:null});continue;}
+      if(actor.status==='idle' && ['ended','dropped'].includes(reviewRunOutcome(sessionEvents(actor.session),job.messageId)))
+        await this.#store.dispatchRuntime({type:'incident',project:job.project,key,message:'执行负责人已结束当前回合，但没有提交计划、任务或验收申请，需要检查并恢复。'});
+    }
+  }
+  close() {
+    if(this.#closing)return this.#closing;
+    this.#closed=true;
+    this.#closing=(async()=>{
+      const results=await Promise.allSettled([this.#driver.close(),this.#active,this.#pump.close()]);
+      this.#live.clear();
+      const errors=results.filter(r=>r.status==='rejected').map(r=>r.reason);
+      if(errors.length)throw new AggregateError(errors,'Runtime shutdown failed');
+    })();return this.#closing;
+  }
+}

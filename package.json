@@ -1,0 +1,13 @@
+{
+  "name": "dsh-foreman-next",
+  "version": "0.1.0",
+  "private": true,
+  "files": ["src", "client", "presets", "README.md"],
+  "type": "module",
+  "description": "DSH milestone execution and independent review controller",
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "exports": { ".": "./src/host.mjs", "./core": "./src/core.mjs", "./client": "./client/index.js", "./outer": "./src/outer-entry.mjs", "./package.json": "./package.json" },
+  "dsh": { "client": { "inject": ["@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-client-ui-renderer", "@deepseek-ai/dsh-client-ui-layout"], "platform": "web" } },
+  "peerDependencies": { "react": "^18.2.0", "@deepseek-ai/dsh-scope": "0.1.7-rc.2 || 0.2.0-rc.2" },
+  "optionalDependencies": { "koffi": "^3.1.0" }
+}

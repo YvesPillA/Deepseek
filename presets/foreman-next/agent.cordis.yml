@@ -1,0 +1,4 @@
+# Agent-plane entry only. Requires the separately mounted foreman-next host.
+# Install only after integration validation; this file is not in the live DSH home.
+- id: foreman-next-outer
+  name: dsh-foreman-next/outer

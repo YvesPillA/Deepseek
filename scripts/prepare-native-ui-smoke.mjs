@@ -1,0 +1,14 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {recordFixtureRuntime} from './dsh-runtime.mjs';
+const base='C:/example/foreman-tests';
+const root=await fs.mkdtemp(path.join(base,'native-ui-smoke-'));
+await fs.mkdir(path.join(root,'home/profiles/web'),{recursive:true});await fs.mkdir(path.join(root,'work'));
+await fs.mkdir(path.join(root,'home/sessions'),{recursive:true});
+await fs.writeFile(path.join(root,'fixture-marker'),'isolated-native-ui-test');
+await recordFixtureRuntime(root);
+await fs.writeFile(path.join(root,'home/profiles/web/package.json'),JSON.stringify({name:'dsh-profile-web',private:true,dependencies:{},dsh:{profile:{bundles:['@deepseek-ai/dsh-base','@deepseek-ai/dsh-web-app']}}},null,2));
+await fs.writeFile(path.join(root,'home/profiles/web/cordis.yml'),'[]\n');
+await fs.writeFile(path.join(root,'home/profiles/web/cordis.patch.yml'),JSON.stringify([{insert:[{id:'native-ui-smoke',name:new URL('./native-ui-smoke.mjs',import.meta.url).href,config:{root}}]}],null,2));
+console.log(root);

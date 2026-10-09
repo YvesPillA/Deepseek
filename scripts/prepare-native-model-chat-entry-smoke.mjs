@@ -1,0 +1,13 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import {recordFixtureRuntime,selectDshRuntime} from './dsh-runtime.mjs';
+import {nativeModelProfileRootConfig} from './native-model-entry.mjs';
+if(selectDshRuntime().version!=='0.2.0-rc.2')throw Error('Actual 0.2 required');
+const root=await fs.mkdtemp('C:/example/foreman-tests/native-chat-entry-');
+await fs.mkdir(path.join(root,'home/profiles/web'),{recursive:true});await fs.mkdir(path.join(root,'home/sessions'));await fs.mkdir(path.join(root,'work'));
+await fs.writeFile(path.join(root,'fixture-marker'),'isolated-native-chat-entry-zero-api');
+await recordFixtureRuntime(root);
+await fs.writeFile(path.join(root,'home/profiles/web/package.json'),JSON.stringify({name:'dsh-profile-web',private:true,dependencies:{},dsh:{profile:{bundles:['@deepseek-ai/dsh-base','@deepseek-ai/dsh-web-app']}}}));
+await fs.writeFile(path.join(root,'home/profiles/web/cordis.yml'),nativeModelProfileRootConfig);
+await fs.writeFile(path.join(root,'home/profiles/web/cordis.patch.yml'),JSON.stringify([{insert:[{id:'native-chat-entry',name:new URL('./native-model-chat-entry-smoke.mjs',import.meta.url).href,config:{root}}]}]));
+console.log(root);
